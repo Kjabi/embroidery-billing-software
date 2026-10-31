@@ -852,7 +852,7 @@ def _handle_read_intent(db, conversation: VoiceConversation, text: str) -> Optio
 
     if (
         re.search(
-            r"\b(?:money )?(?:collected|collection|receipts)\b"
+            r"\b(?:money )?(?:collected|collections?|receipts?)\b"
             r"|\bpayments? (?:today|history)\b"
             r"|\bhow much (?:money )?(?:did (?:we|i) )?(?:collect|receive|get)\b",
             value,
@@ -894,7 +894,7 @@ def _handle_read_intent(db, conversation: VoiceConversation, text: str) -> Optio
         return _call_read("list_products", {}, db, conversation)
 
     template_match = re.search(
-        r"(?:measurements?|sizes?)\s+(?:for|of|required for)\s+(.+)$", text, re.I
+        r"(?:measurements?|sizes?)\s+(?:are\s+)?(?:for|of|required for)\s+(.+)$", text, re.I
     )
     if template_match:
         query = _clean_query(template_match.group(1))
@@ -916,10 +916,29 @@ def _handle_read_intent(db, conversation: VoiceConversation, text: str) -> Optio
         )
 
     order_match = _ORDER_NUMBER.search(text)
-    if order_match and not _WRITE_VERBS.search(value):
+    if (
+        order_match
+        and not _WRITE_VERBS.search(value)
+        and not re.search(r"\binvoice\b", value)
+    ):
         return _call_read(
             "get_order_details", {"order_id": int(order_match.group(1))}, db, conversation
         )
+
+    details_match = re.search(
+        r"(?:details?|profile|information|info)\s+(?:of|for)\s+(.+)$", text, re.I
+    )
+    if not details_match:
+        details_match = re.search(
+            r"(?:show|get|give|pull up)\s+(?:me\s+)?(.+?)(?:'s)?\s+"
+            r"(?:details?|profile|information|info)\b",
+            text,
+            re.I,
+        )
+    if details_match:
+        query = _clean_query(details_match.group(1))
+        if query and not re.search(r"\b(?:order|payment|invoice)\b", query, re.I):
+            return _call_read("get_customer_details", {"query": query}, db, conversation)
 
     customer_history = re.search(
         r"(?:orders?|history)\s+(?:for|of)\s+(.+)$", text, re.I

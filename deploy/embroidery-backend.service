@@ -1,0 +1,21 @@
+# /etc/systemd/system/embroidery-backend.service
+# Run `systemctl daemon-reload` after installing. Adjust WorkingDirectory.
+[Unit]
+Description=Lalitha's Apparel backend (Docker Compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/embroidery
+EnvironmentFile=/opt/embroidery/deploy/systemd.env
+ExecStart=/usr/bin/docker compose -f deploy/docker-compose.yml up -d --build
+ExecStop=/usr/bin/docker compose -f deploy/docker-compose.yml down
+ExecReload=/usr/bin/docker compose -f deploy/docker-compose.yml up -d --build
+TimeoutStartSec=0
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

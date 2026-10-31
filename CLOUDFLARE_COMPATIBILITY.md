@@ -53,7 +53,10 @@ layers compatible.
 1. **Keep the backend on a persistent Python host** (current local/self-hosted
    model) and use Pages only for the frontend. This preserves every existing
    API contract and business rule. A commercial Vercel Hobby deployment is not
-   an acceptable production target for this client.
+   an acceptable production target for this client. The prepared zero-cost
+   path is documented in [`deploy/oracle-always-free.md`](deploy/oracle-always-free.md)
+   (Oracle Always Free ARM64 + Caddy + existing Supabase), including the
+   artifacts in `deploy/`. It has not been deployed.
 2. **Port the data layer to Supabase REST/PostgREST via `httpx`** in a Python
    Worker. This removes the native driver but requires rewriting SQLAlchemy
    queries and losing the current transaction/idempotency guarantees unless
@@ -94,5 +97,7 @@ the Supabase Storage values, and optional provider keys.
 - Pages frontend deployment path: **viable and build-verified locally**.
 - Cloudflare Python Workers backend: **not compatible without a data-layer
   rewrite; blocked, not attempted**.
+- Free Python-host alternative: **prepared and locally validated, not
+  deployed**. See `deploy/oracle-always-free.md`.
 - Source of truth for production remains PostgreSQL/Supabase with the existing
   FastAPI process until the compatibility blockers are resolved.

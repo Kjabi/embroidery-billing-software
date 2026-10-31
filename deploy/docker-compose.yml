@@ -1,0 +1,49 @@
+# Docker Compose for the existing FastAPI backend on a free Linux ARM64 host.
+#
+#   cp backend.env.example backend.env   # fill secrets, chmod 600
+#   export BACKEND_DOMAIN=your-name.duckdns.org
+#   docker compose up -d --build
+#
+# The backend is not published on a public port. Caddy terminates TLS and
+# proxies to it over the private Docker network.
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    env_file:
+      - ./backend.env
+    environment:
+      APP_ENV: production
+      APP_DATA_DIR: /app/data
+      APP_INVOICE_DIR: /app/invoices
+      APP_BACKUP_DIR: /app/backups
+    expose:
+      - "8000"
+    ports:
+      # Loopback only: useful for local health checks, not internet-exposed.
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - backend
+    environment:
+      BACKEND_DOMAIN: ${BACKEND_DOMAIN:?set BACKEND_DOMAIN to a DNS name you control}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  caddy_data:
+  caddy_config:

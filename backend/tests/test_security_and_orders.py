@@ -200,6 +200,30 @@ def test_voice_conversation_preserves_draft_and_requires_confirmed_save(tmp_path
         assert "2026-11-02" in delivered.json()["reply"]
 
 
+def test_voice_read_phrase_regressions(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        headers = login(client)
+
+        collections = client.post(
+            "/api/voice/turn", headers=headers, json={"text": "Show me today's collections"}
+        ).json()
+        assert "payments" in collections["data"]
+        assert "No matching customers" not in collections["reply"]
+
+        details = client.post(
+            "/api/voice/turn", headers=headers, json={"text": "Show me Priya's details"}
+        ).json()
+        assert details["data"].get("customer")
+        assert "No matching customers" not in details["reply"]
+
+        template = client.post(
+            "/api/voice/turn",
+            headers=headers,
+            json={"text": "What measurements are required for Normal Blouse?"},
+        ).json()
+        assert template["data"].get("required_measurements")
+
+
 def test_voice_audio_rejects_unsupported_and_empty_recordings(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         headers = login(client)
