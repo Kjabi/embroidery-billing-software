@@ -1,0 +1,10 @@
+name = "embroidery-management"
+compatibility_date = "2024-09-23"
+pages_build_output_dir = "frontend/dist"
+
+[site]
+bucket = "frontend/dist"
+
+# Configuration for Cloudflare Pages deployment
+# Build command: cd frontend && npm install && npm run build
+# Deploy directory: frontend/dist

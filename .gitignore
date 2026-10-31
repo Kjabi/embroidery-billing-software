@@ -1,0 +1,22 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Local databases, uploaded files, invoice outputs, and backups
+backend/data/
+backend/backups/
+backend/invoices/
+
+# Frontend build/runtime dependencies
+frontend/node_modules/
+frontend/dist/
+
+# Python artifacts
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.venv/

@@ -1,0 +1,22 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+sqlalchemy==2.0.35
+pydantic>=2.12.0,<3
+reportlab==4.2.2
+Pillow>=10.4.0,<12
+python-multipart==0.0.9
+psycopg[binary]>=3.2.3,<4
+certifi>=2024.8.30
+httpx>=0.27.0,<1
+pytest>=8.3.0,<9
+# Optional local, zero-cost speech-to-text provider (default STT choice).
+# It is imported lazily: the API and the typed voice assistant still work if
+# this package or its model files are unavailable. The first transcription
+# downloads a model, which needs network access, disk space, and enough CPU/RAM.
+# Benchmark it on the real deployment hardware before relying on it.
+faster-whisper>=1.1.0,<2
+# Optional chat providers use the existing httpx dependency:
+#   * Ollama: run Ollama locally and set OLLAMA_CHAT_MODEL, VOICE_LLM_PROVIDER=ollama
+#   * Groq: set GROQ_API_KEY + GROQ_CHAT_MODEL, VOICE_LLM_PROVIDER=groq, but only
+#     after independently verifying a zero-cost allowance. Never enabled by default.
+# No paid SDK is required or installed for the voice assistant.

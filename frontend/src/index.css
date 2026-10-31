@@ -1,0 +1,282 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #161d1a;
+  background: #f5f7fb;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+/* Primary brand gradient supplied for the embroidery workspace. */
+body {
+  background: #edf0ef;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #f5f7fb;
+  color: #243447;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  border-radius: 0.625rem;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Zoho-inspired business workspace palette. */
+.bg-slate-950 {
+  background-color: #edf0ef !important;
+  color: #161d1a !important;
+}
+
+body > #root > div.min-h-screen > div.min-h-screen {
+  background: transparent !important;
+}
+
+.bg-slate-900 {
+  background-color: #ffffff !important;
+  color: #161d1a !important;
+  border-radius: 1.125rem !important;
+  box-shadow: 0 1px 2px rgba(22, 29, 26, 0.03), 0 8px 24px rgba(22, 29, 26, 0.04);
+}
+
+.bg-slate-800 {
+  background-color: #f5f7f6 !important;
+}
+
+.hover\:bg-slate-800:hover,
+.hover\:bg-slate-700:hover {
+  background-color: #e6edf6 !important;
+}
+
+.border-slate-800,
+.border-slate-700 {
+  border-color: #e4e9e7 !important;
+}
+
+.text-slate-100,
+.text-slate-200 {
+  color: #161d1a !important;
+}
+
+.text-slate-300,
+.text-slate-400 {
+  color: #52605a !important;
+}
+
+.text-slate-500 {
+  color: #52606d !important;
+}
+
+.text-white {
+  color: #161d1a !important;
+}
+
+.text-indigo-300,
+.text-indigo-400 {
+  color: #1768c4 !important;
+}
+
+.text-emerald-300,
+.text-emerald-400 {
+  color: #08734f !important;
+}
+
+.text-amber-400 {
+  color: #8a5600 !important;
+}
+
+.text-rose-400,
+.text-rose-300 {
+  color: #b42332 !important;
+}
+
+.bg-indigo-600 {
+  background-color: #1768c4 !important;
+  color: #ffffff !important;
+}
+
+.hover\:bg-indigo-500:hover {
+  background-color: #0f5aa8 !important;
+}
+
+.bg-indigo-600\/20 {
+  background-color: #e4f0ff !important;
+}
+
+.bg-emerald-600\/20 {
+  background-color: #e6f7f0 !important;
+}
+
+.bg-red-500\/10 {
+  background-color: #fff0f1 !important;
+}
+
+.text-red-300 {
+  color: #b42332 !important;
+}
+
+input,
+select,
+textarea {
+  background-color: #ffffff !important;
+  border-color: #cfd8e3 !important;
+  color: #161d1a !important;
+  border-radius: 0.625rem !important;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #9aa7b7;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 0;
+  border-color: #2878d4 !important;
+  box-shadow: 0 0 0 3px rgba(40, 120, 212, 0.14);
+}
+
+aside,
+aside.bg-slate-900 {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 30;
+  width: 15rem !important;
+  background: #ffffff !important;
+  border-color: #e4e9e7 !important;
+  color: #161d1a;
+  box-shadow: 1px 0 0 rgba(22, 29, 26, 0.02);
+}
+
+aside .border-slate-800 {
+  border-color: #e4e9e7 !important;
+}
+
+aside h2,
+aside p,
+aside .text-slate-100,
+aside .text-slate-200,
+aside .text-slate-300,
+aside .text-slate-400,
+aside .text-white {
+  color: #161d1a !important;
+}
+
+aside .text-emerald-400 {
+  color: #7c8781 !important;
+}
+
+aside .text-indigo-400 {
+  color: #2878d4 !important;
+}
+
+aside button.text-slate-400 {
+  color: #52605a !important;
+}
+
+aside button.text-slate-400:hover {
+  color: #161d1a !important;
+  background-color: #f5f7f6 !important;
+}
+
+aside button.bg-indigo-600 {
+  background: rgba(59, 130, 246, 0.1) !important;
+  color: #2878d4 !important;
+  box-shadow: none;
+}
+
+aside button.bg-indigo-600 {
+  color: #1768c4 !important;
+}
+
+main {
+  min-height: 100vh;
+  margin-left: 15rem;
+  background: #edf0ef;
+}
+
+main h1 {
+  color: #161d1a;
+  letter-spacing: -0.02em;
+}
+
+table thead {
+  background: #f8fafc;
+}
+
+table th {
+  color: #64748b;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+table tbody tr:hover {
+  background: #f5f7f6;
+}
+
+main .rounded-2xl {
+  border-radius: 1.125rem;
+}
+
+main .rounded-xl {
+  border-radius: 0.875rem;
+}
+
+main button {
+  min-height: 2.5rem;
+}
+
+main button.p-2,
+main button.py-1\.5 {
+  min-height: 2.25rem;
+}
+
+main table a,
+main table button {
+  min-height: 2.5rem;
+}
+
+.shadow-2xl {
+  box-shadow: 0 18px 45px rgba(22, 29, 26, 0.12) !important;
+}
+
+@media (max-width: 768px) {
+  aside {
+    position: static;
+    width: 100% !important;
+    min-height: auto !important;
+  }
+
+  main {
+    margin-left: 0;
+    padding: 1rem !important;
+  }
+}

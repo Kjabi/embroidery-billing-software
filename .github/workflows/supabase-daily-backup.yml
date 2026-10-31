@@ -1,0 +1,42 @@
+name: Supabase daily private backup
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 19:35 UTC = 01:05 India Standard Time on the following calendar day.
+    - cron: "35 19 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lalithas-apparel-storage-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      APP_ENV: production
+      SUPABASE_DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_FILES_BUCKET: lalithas-files
+      SUPABASE_BACKUP_BUCKET: lalithas-backups
+      BACKUP_MAX_STORAGE_OBJECTS: "200"
+      BACKUP_MAX_OBJECT_BYTES: "26214400"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements.txt
+      - name: Create and verify private Storage backup
+        working-directory: backend
+        run: python scripts/run_scheduled_backup.py
