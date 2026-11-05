@@ -1,0 +1,13 @@
+{
+  "health": {
+    "status": "ok"
+  },
+  "login_ok": true,
+  "orders_read_from_restore": 250,
+  "reported_total": 893,
+  "first_invoice": "INV-2026-893",
+  "new_order_on_restore": {
+    "id": 893,
+    "invoice_number": "INV-2026-893"
+  }
+}

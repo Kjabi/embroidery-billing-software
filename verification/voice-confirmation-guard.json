@@ -1,0 +1,24 @@
+{
+  "pending_action": "create_order",
+  "rejected_phrases": [
+    {
+      "phrase": "confirm this operation",
+      "status": 422,
+      "detail": "The confirmation phrase does not match this operation. Nothing was saved."
+    },
+    {
+      "phrase": "confirm order for Aarthi Voicecheck total 801",
+      "status": 422,
+      "detail": "The confirmation phrase does not match this operation. Nothing was saved."
+    }
+  ],
+  "accepted": {
+    "phrase": "confirm order for Aarthi Voicecheck total 800",
+    "status": 200,
+    "reply": "Order INV-2026-904 was created successfully. Total Rs. 800.00, paid Rs. 0.00, balance Rs. 800.00, delivery 2026-11-06."
+  },
+  "replay": {
+    "status": 200,
+    "reply": "Order INV-2026-904 was created successfully. Total Rs. 800.00, paid Rs. 0.00, balance Rs. 800.00, delivery 2026-11-06. It was not submitted again."
+  }
+}

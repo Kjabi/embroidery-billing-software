@@ -1,0 +1,36 @@
+{
+  "health": {
+    "status": "ok"
+  },
+  "migration_seed_verified": true,
+  "created": {
+    "id": 893,
+    "invoice_number": "INV-2026-893"
+  },
+  "idempotent_replay": {
+    "id": 893,
+    "invoice_number": "INV-2026-893",
+    "idempotent_replay": true
+  },
+  "replay_same_id": true,
+  "orders_total": 893,
+  "database": "embroidery_migration (clone of populated dev DB)",
+  "pre_migration": {
+    "admin_sessions": false,
+    "invoice_sequences": false,
+    "new_order_columns": 0,
+    "transaction_idempotency_column": 0,
+    "max_invoice": "INV-2026-892",
+    "orders": 892
+  },
+  "migration_applied": "backend/migrations/0003_session_invoice_snapshots_and_idempotency.sql",
+  "post_migration": {
+    "admin_sessions": true,
+    "invoice_sequences": true,
+    "new_order_columns": 2,
+    "transaction_idempotency_column": 1,
+    "indexes_created": 3,
+    "sequence_year": 2026,
+    "sequence_next_number": 893
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "base_url": "http://localhost:5180",
+  "started_at": "2026-11-05T10:23:55.348Z",
+  "steps": {
+    "login_page": {
+      "ok": true,
+      "ms": 684,
+      "login_button_visible": true
+    },
+    "login": {
+      "ok": true,
+      "ms": 286,
+      "token_stored": true
+    },
+    "dashboard": {
+      "ok": true,
+      "ms": 1300,
+      "shows_total_income": true,
+      "shows_outstanding": true,
+      "shows_attention": true,
+      "shows_production": true,
+      "body_chars": 2313
+    },
+    "orders_list": {
+      "ok": true,
+      "ms": 534,
+      "table_rows": 100,
+      "first_row": "INV-2026-901 2026-11-05 Aarthi Voicecheck (9123456780) Saree Falls ₹800 ₹0 ₹800 Pending PDF Bill WA Bill Send PDF WA Ready Delete Mark Paid"
+    },
+    "new_order": {
+      "ok": true,
+      "ms": 2618,
+      "select_count": 3,
+      "measurement_fields": 9,
+      "create_status": 200,
+      "created": {
+        "id": 902,
+        "invoice_number": "INV-2026-902"
+      },
+      "pdf_status": 200,
+      "pdf_content_type": "application/pdf",
+      "pdf_bytes_observed_by_popup": 0,
+      "popup_navigation": "blob: URL via window.location; headless Chromium aborts the PDF viewer navigation"
+    },
+    "invoice_pdf": {
+      "ok": true,
+      "ms": 147,
+      "popup_opened": true,
+      "pdf_status": 200,
+      "pdf_content_type": "application/pdf",
+      "pdf_bytes": 0,
+      "pdf_magic": ""
+    },
+    "invoice_pdf_browser_fetch": {
+      "ok": true,
+      "ms": 33,
+      "order_id": 902,
+      "status": 200,
+      "content_type": "application/pdf",
+      "content_disposition": null,
+      "bytes": 47082,
+      "magic": "%PDF-",
+      "valid_pdf": true
+    },
+    "typed_voice": {
+      "ok": true,
+      "ms": 542,
+      "reply_preview": "Pending orders: INV-2026-902 — Aarthi Voicecheck — Normal Blouse — total Rs. 500.00, paid Rs. 0.00, balance Rs. 500.00, delivery not set; INV-2026-901 — Aarthi Voicecheck — Saree Falls — total Rs. 800.00, paid Rs. 0.00, balance Rs. 800.00, delivery 2026-11-06; INV-2026-900 — Aarthi Voicecheck — Sare",
+      "alert_count": 0
+    },
+    "voice_setup_customer": {
+      "ok": true,
+      "ms": 21,
+      "existing": true,
+      "id": 123,
+      "name": "Aarthi Voicecheck"
+    },
+    "voice_confirmation_flow": {
+      "ok": true,
+      "ms": 4059,
+      "preview_title": "Create this order",
+      "preview_mentions_customer": true,
+      "preview_mentions_amount": true,
+      "confirmation_phrase": "confirm order for Aarthi Voicecheck total 800",
+      "confirmation_phrase_matches_expected": true,
+      "confirm_status": 200,
+      "confirm_reply": "Order INV-2026-903 was created successfully. Total Rs. 800.00, paid Rs. 0.00, balance Rs. 800.00, delivery 2026-11-06.",
+      "data_ok": true
+    },
+    "mobile_layout": {
+      "ok": true,
+      "ms": 2433,
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "dashboard_nav_visible": true,
+      "horizontal_overflow": false
+    }
+  },
+  "console_errors": [],
+  "page_errors": [],
+  "failed_requests": [],
+  "passed": true,
+  "console_error_count": 0,
+  "page_error_count": 0,
+  "failed_request_count": 0,
+  "finished_at": "2026-11-05T10:24:08.147Z"
+}

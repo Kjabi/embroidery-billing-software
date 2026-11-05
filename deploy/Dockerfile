@@ -43,4 +43,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # process-local. Use an external queue/session store before scaling out.
 # The compose file binds this port to 127.0.0.1 only, behind Caddy, so trusting
 # forwarded headers is safe there. Do not publish 8000 directly.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# Keep-alive is raised above Caddy/browser idle time. uvicorn's default of 5s
+# can close a connection exactly as a client reuses it, which surfaces as a
+# spurious "connection reset" for non-idempotent calls (e.g. voice turns).
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*", "--timeout-keep-alive", "75"]

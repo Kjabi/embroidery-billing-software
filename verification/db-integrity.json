@@ -1,0 +1,30 @@
+{
+  "orders": 904,
+  "invoice_payments": 508,
+  "duplicate_invoice_numbers": 0,
+  "duplicate_create_request_id": 0,
+  "duplicate_txn_idempotency": 0,
+  "orders_missing_invoice": 0,
+  "negative_transaction_amounts": 0,
+  "overpaid_orders": 0,
+  "negative_balance": 0,
+  "bad_balance": 0,
+  "bad_totals": 0,
+  "ledger_mismatch": 0,
+  "orphan_measurements": 0,
+  "orphan_customer_fk": 0,
+  "max_invoice": "INV-2026-904",
+  "min_invoice": "INV-2026-001",
+  "status_counts": {
+    "Partially Paid": 508,
+    "Pending": 396
+  },
+  "transaction_totals": [
+    {
+      "type": "INCOME",
+      "count": 508,
+      "sum": 152400.0
+    }
+  ],
+  "all_zero_error_checks": true
+}

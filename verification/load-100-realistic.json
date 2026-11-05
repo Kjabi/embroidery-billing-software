@@ -1,0 +1,136 @@
+{
+  "base_url": "http://127.0.0.1:8010",
+  "users": 100,
+  "think_time_seconds": [
+    1.0,
+    2.5
+  ],
+  "duration_seconds": 92.15,
+  "login_burst_seconds": 3.78,
+  "total_requests": 5298,
+  "throughput_rps": 57.5,
+  "status_counts": {
+    "200": 5298
+  },
+  "server_errors": 0,
+  "rejected_503": 0,
+  "server_error_rate_percent": 0.0,
+  "all_latency_ms": {
+    "count": 5298,
+    "p50": 15.85,
+    "p95": 52.24,
+    "p99": 2213.64,
+    "max": 3763.48,
+    "mean": 62.67
+  },
+  "per_operation_ms": {
+    "customers_list": {
+      "count": 1121,
+      "p50": 14.12,
+      "p95": 36.31,
+      "p99": 66.24,
+      "max": 162.86,
+      "mean": 18.21
+    },
+    "finance": {
+      "count": 582,
+      "p50": 12.77,
+      "p95": 38.86,
+      "p99": 77.6,
+      "max": 166.07,
+      "mean": 16.39
+    },
+    "finance_csv": {
+      "count": 312,
+      "p50": 7.45,
+      "p95": 29.18,
+      "p99": 62.12,
+      "max": 152.58,
+      "mean": 11.68
+    },
+    "invoice_pdf": {
+      "count": 163,
+      "p50": 37.29,
+      "p95": 67.84,
+      "p99": 192.75,
+      "max": 239.37,
+      "mean": 42.95
+    },
+    "login": {
+      "count": 101,
+      "p50": 2266.41,
+      "p95": 3744.1,
+      "p99": 3753.5,
+      "max": 3763.48,
+      "mean": 2268.1
+    },
+    "order_create": {
+      "count": 477,
+      "p50": 12.49,
+      "p95": 45.62,
+      "p99": 117.39,
+      "max": 247.12,
+      "mean": 19.02
+    },
+    "order_pay": {
+      "count": 276,
+      "p50": 11.47,
+      "p95": 34.91,
+      "p99": 71.1,
+      "max": 238.34,
+      "mean": 16.43
+    },
+    "orders_list": {
+      "count": 1433,
+      "p50": 20.1,
+      "p95": 45.56,
+      "p99": 77.5,
+      "max": 216.8,
+      "mean": 24.21
+    },
+    "products_list": {
+      "count": 437,
+      "p50": 7.02,
+      "p95": 30.12,
+      "p99": 53.09,
+      "max": 138.53,
+      "mean": 11.0
+    },
+    "templates_list": {
+      "count": 296,
+      "p50": 9.05,
+      "p95": 30.32,
+      "p99": 39.31,
+      "max": 50.55,
+      "mean": 12.92
+    },
+    "voice_turn": {
+      "count": 100,
+      "p50": 38.86,
+      "p95": 146.22,
+      "p99": 248.76,
+      "max": 277.94,
+      "mean": 54.26
+    }
+  },
+  "voice_turns_ok": 100,
+  "voice_turns_rate_limited": 0,
+  "orders_created": 477,
+  "task_exceptions": [],
+  "idempotency_replay": {
+    "status": 200,
+    "same_id": true,
+    "idempotent_replay": true,
+    "order_count_before": 477,
+    "order_count_after": 477
+  },
+  "server_samples": {
+    "count": 46,
+    "max_cpu_percent": 779.0,
+    "avg_cpu_percent": 64.3,
+    "max_rss_mb": 120.1,
+    "avg_rss_mb": 116.3
+  },
+  "errors": [],
+  "error_count": 0
+}

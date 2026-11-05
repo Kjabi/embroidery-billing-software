@@ -15,6 +15,9 @@ backend/invoices/
 frontend/node_modules/
 frontend/dist/
 
+# Local verification runtime (database cluster, Playwright, temporary files)
+.runtime/
+
 # Python artifacts
 **/__pycache__/
 **/*.py[cod]

@@ -1,0 +1,16 @@
+{
+  "health_after_restart": {
+    "status": "ok"
+  },
+  "old_token_accepted": true,
+  "pre_restart_order_still_present": true,
+  "pre_restart_order_id": 891,
+  "pre_restart_invoice": "INV-2026-891",
+  "voice_turn_after_restart_status": 200,
+  "voice_reply_preview": "Pending orders: INV-2026-891 \u2014 Load Customer 119 \u2014 Normal Blouse \u2014 total Rs. 500.00, paid Rs. 0.00, balance Rs. 500.00, delivery 2026-11-12; INV-2026-890 \u2014 Load Customer 109 \u2014 Norm",
+  "voice_pending_count": 20,
+  "order_created_after_restart": {
+    "id": 892,
+    "invoice_number": "INV-2026-892"
+  }
+}

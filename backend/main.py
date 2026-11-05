@@ -1,5 +1,6 @@
 import os
 from contextlib import asynccontextmanager
+import asyncio
 import base64
 import binascii
 import csv
@@ -20,9 +21,10 @@ from datetime import datetime, date
 from types import SimpleNamespace
 from typing import List, Optional
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Query, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, Response
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field, field_validator
 from storage import (
     StorageError, is_configured as storage_is_configured, upload_bytes as storage_upload_bytes,
     download_bytes as storage_download_bytes, delete_object as storage_delete_object,
@@ -31,7 +33,7 @@ from storage import (
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Boolean, Text, ForeignKey, inspect, text, event
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 
 from reportlab.lib.pagesizes import A4
@@ -111,9 +113,27 @@ else:
         os.makedirs(d, exist_ok=True)
 
 PRIMARY_DATABASE_URL = SUPABASE_DATABASE_URL or f"sqlite:///{DB_PATH}"
+DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
+DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+DB_POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", "5"))
+MAX_INFLIGHT_REQUESTS = max(
+    1, int(os.getenv("MAX_INFLIGHT_REQUESTS", str(DB_POOL_SIZE + DB_MAX_OVERFLOW)))
+)
+INFLIGHT_WAIT_SECONDS = float(os.getenv("INFLIGHT_WAIT_SECONDS", "10"))
 engine_options = {"pool_pre_ping": True}
 if PRIMARY_DATABASE_URL.startswith("sqlite"):
     engine_options["connect_args"] = {"check_same_thread": False, "timeout": 10}
+else:
+    # A single worker runs sync endpoints in a bounded thread pool. Keep the
+    # database pool at least as large as that pool so requests never wait 30s
+    # for a connection during a burst, and fail fast instead of hanging.
+    engine_options.update(
+        pool_size=DB_POOL_SIZE,
+        max_overflow=DB_MAX_OVERFLOW,
+        pool_timeout=DB_POOL_TIMEOUT,
+        pool_recycle=1800,
+        pool_use_lifo=True,
+    )
 engine = create_engine(PRIMARY_DATABASE_URL, **engine_options)
 
 if PRIMARY_DATABASE_URL.startswith("sqlite"):
@@ -620,12 +640,71 @@ async def app_lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Lalitha's Apparel - Embroidery & Boutique Billing", lifespan=app_lifespan)
+_inflight_semaphore = asyncio.Semaphore(MAX_INFLIGHT_REQUESTS)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.middleware("http")
+async def limit_inflight_requests(request: Request, call_next):
+    """Bound concurrent work so a burst queues briefly instead of exhausting the DB pool."""
+    try:
+        await asyncio.wait_for(_inflight_semaphore.acquire(), timeout=INFLIGHT_WAIT_SECONDS)
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "The server is busy. Please retry in a moment."},
+            headers={"Retry-After": "2"},
+        )
+    try:
+        return await call_next(request)
+    finally:
+        _inflight_semaphore.release()
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Defense in depth; the production reverse proxy also sets these headers."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "microphone=(self), camera=(), geolocation=()")
+    return response
+
+
+def _json_safe_validation_value(value):
+    """Validation errors echo the rejected input back; keep non-finite floats serializable."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe_validation_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_validation_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """Always return a clean 422, even when the invalid input cannot be JSON encoded."""
+    detail = _json_safe_validation_value(exc.errors())
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
+@app.exception_handler(SQLAlchemyTimeoutError)
+async def database_busy_handler(request: Request, exc: SQLAlchemyTimeoutError):
+    """Fail fast and retryable instead of returning an opaque 500 under a burst."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The database is busy. Please retry in a moment."},
+        headers={"Retry-After": "2"},
+    )
 
 
 def get_db():
@@ -686,71 +765,204 @@ def voice_is_rate_limited(client_key: str) -> bool:
 
 
 # --- SCHEMAS ---
+def _nonblank(value: str, label: str) -> str:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        raise ValueError(f"{label} must not be blank")
+    return cleaned
+
+
+def _iso_date(value: Optional[str], label: str) -> Optional[str]:
+    if value is None or value == "":
+        return value
+    try:
+        parsed = date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a valid ISO date (YYYY-MM-DD)") from exc
+    if parsed.year < 2000 or parsed.year > 2100:
+        raise ValueError(f"{label} must be between 2000 and 2100")
+    return parsed.isoformat()
+
+
+def _query_date(value: Optional[str], label: str) -> Optional[str]:
+    if value is None or value == "":
+        return value
+    try:
+        return _iso_date(value, label)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _finite_nonnegative(value: float, label: str) -> float:
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{label} must be a finite non-negative number")
+    return value
+
+
 class LoginReq(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=1, max_length=240)
 
 
 class CustomerCreate(BaseModel):
-    name: str
-    phone: str
-    alternate_phone: Optional[str] = ""
-    address: Optional[str] = ""
-    city: Optional[str] = "Madurai"
-    notes: Optional[str] = ""
+    name: str = Field(min_length=1, max_length=120)
+    phone: str = Field(min_length=3, max_length=30)
+    alternate_phone: Optional[str] = Field(default="", max_length=30)
+    address: Optional[str] = Field(default="", max_length=240)
+    city: Optional[str] = Field(default="Madurai", max_length=80)
+    notes: Optional[str] = Field(default="", max_length=1000)
+
+    @field_validator("name", "phone", "alternate_phone", "address", "city", "notes")
+    @classmethod
+    def strip_text(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("name", "phone")
+    @classmethod
+    def required_text(cls, value: str, info) -> str:
+        return _nonblank(value, info.field_name)
 
 
 class ProductCreate(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=120)
     pricing_type: str
-    base_price: float = 0.0
-    measurement_template_id: Optional[int] = None
+    base_price: float = Field(default=0.0, ge=0, le=100_000_000)
+    measurement_template_id: Optional[int] = Field(default=None, ge=1)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        return _nonblank(value, "name")
+
+    @field_validator("pricing_type")
+    @classmethod
+    def valid_pricing_type(cls, value: str) -> str:
+        if value not in {"MANUAL", "BASE_PLUS_EXTRA", "STITCH_BASED"}:
+            raise ValueError("pricing_type must be MANUAL, BASE_PLUS_EXTRA, or STITCH_BASED")
+        return value
+
+    @field_validator("base_price")
+    @classmethod
+    def finite_base_price(cls, value: float) -> float:
+        return _finite_nonnegative(value, "base_price")
 
 
 class TemplateCreate(BaseModel):
-    name: str
-    fields: List[str]
+    name: str = Field(min_length=1, max_length=120)
+    fields: List[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        return _nonblank(value, "name")
+
+    @field_validator("fields")
+    @classmethod
+    def clean_fields(cls, values: List[str]) -> List[str]:
+        cleaned = [(value or "").strip() for value in values]
+        at_least_one = [value for value in cleaned if value]
+        if not at_least_one:
+            raise ValueError("At least one measurement field is required")
+        if any(len(value) > 80 for value in at_least_one):
+            raise ValueError("Measurement field names must be 80 characters or fewer")
+        return at_least_one
 
 
 class RateUpdate(BaseModel):
-    category: str
-    rate_per_stitch: float
+    category: str = Field(min_length=1, max_length=80)
+    rate_per_stitch: float = Field(ge=0, le=100_000)
+
+    @field_validator("category")
+    @classmethod
+    def strip_category(cls, value: str) -> str:
+        return _nonblank(value, "category")
+
+    @field_validator("rate_per_stitch")
+    @classmethod
+    def finite_rate(cls, value: float) -> float:
+        return _finite_nonnegative(value, "rate_per_stitch")
 
 
 class MeasurementItem(BaseModel):
-    field_name: str
-    value: str
+    field_name: str = Field(min_length=1, max_length=80)
+    value: str = Field(default="", max_length=60)
+
+    @field_validator("field_name")
+    @classmethod
+    def strip_field(cls, value: str) -> str:
+        return _nonblank(value, "field_name")
 
 
 class OrderCreate(BaseModel):
-    customer_id: int
-    product_id: int
+    customer_id: int = Field(ge=1)
+    product_id: int = Field(ge=1)
     order_date: str
-    delivery_date: Optional[str] = ""
-    description: Optional[str] = ""
-    embroidery_category: Optional[str] = None
-    stitch_count: int = 0
-    rate_per_stitch: float = 0.0
-    base_amount: float = 0.0
-    extra_amount: float = 0.0
-    total_amount: float
-    paid_amount: float
-    measurements: List[MeasurementItem] = []
-    idempotency_key: str
+    delivery_date: Optional[str] = Field(default="", max_length=10)
+    description: Optional[str] = Field(default="", max_length=1000)
+    embroidery_category: Optional[str] = Field(default=None, max_length=80)
+    stitch_count: int = Field(default=0, ge=0, le=100_000_000)
+    rate_per_stitch: float = Field(default=0.0, ge=0, le=100_000)
+    base_amount: float = Field(default=0.0, ge=0, le=100_000_000)
+    extra_amount: float = Field(default=0.0, ge=0, le=100_000_000)
+    total_amount: float = Field(ge=0, le=100_000_000)
+    paid_amount: float = Field(ge=0, le=100_000_000)
+    measurements: List[MeasurementItem] = Field(default_factory=list, max_length=50)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("order_date", "delivery_date")
+    @classmethod
+    def valid_order_dates(cls, value: Optional[str], info) -> Optional[str]:
+        return _iso_date(value, info.field_name)
+
+    @field_validator("rate_per_stitch", "base_amount", "extra_amount", "total_amount", "paid_amount")
+    @classmethod
+    def finite_money(cls, value: float, info) -> float:
+        return _finite_nonnegative(value, info.field_name)
 
 
 class PaymentUpdate(BaseModel):
-    additional_paid: float
-    idempotency_key: str
+    additional_paid: float = Field(gt=0, le=100_000_000)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("additional_paid")
+    @classmethod
+    def finite_payment(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("additional_paid must be a finite positive number")
+        return value
 
 
 class TransactionCreate(BaseModel):
     date: str
     type: str
-    category: str
-    description: str
-    amount: float
-    payment_method: str = "Cash/UPI"
+    category: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+    amount: float = Field(gt=0, le=100_000_000)
+    payment_method: str = Field(default="Cash/UPI", max_length=40)
+
+    @field_validator("date")
+    @classmethod
+    def valid_date(cls, value: str) -> str:
+        return _iso_date(value, "date")
+
+    @field_validator("type")
+    @classmethod
+    def valid_type(cls, value: str) -> str:
+        if value not in {"INCOME", "EXPENSE"}:
+            raise ValueError("type must be INCOME or EXPENSE")
+        return value
+
+    @field_validator("category")
+    @classmethod
+    def strip_category(cls, value: str) -> str:
+        return _nonblank(value, "category")
+
+    @field_validator("amount")
+    @classmethod
+    def finite_amount(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("amount must be a finite positive number")
+        return value
 
 
 # --- PDF GENERATOR ---
@@ -900,6 +1112,13 @@ def generate_invoice_pdf(
 
 
 # --- API ENDPOINTS ---
+@app.get("/api/health")
+def health(db: Session = Depends(get_db)):
+    """Lightweight readiness probe used by load balancers and monitoring."""
+    db.execute(text("SELECT 1"))
+    return {"status": "ok"}
+
+
 @app.post("/api/login")
 def login(req: LoginReq, request: Request, db: Session = Depends(get_db)):
     client_key = request.client.host if request.client else "unknown"
@@ -1109,15 +1328,30 @@ def list_customers(
         query = query.filter((Customer.name.ilike(f"%{q}%")) | (Customer.phone.ilike(f"%{q}%")))
     total = query.count()
     customers = query.order_by(Customer.id.desc()).offset(offset).limit(limit).all()
+    customer_ids = [c.id for c in customers]
+    orders_by_customer: dict[int, list[tuple[int, float]]] = defaultdict(list)
+    latest_order_by_customer: dict[int, int] = {}
+    measurements_by_order: dict[int, dict[str, str]] = defaultdict(dict)
+    if customer_ids:
+        order_rows = db.query(Order.id, Order.customer_id, Order.total_amount).filter(
+            Order.customer_id.in_(customer_ids)
+        ).order_by(Order.id.asc()).all()
+        for order_id, customer_id, total_amount in order_rows:
+            orders_by_customer[customer_id].append((order_id, total_amount))
+            latest_order_by_customer[customer_id] = order_id
+        latest_order_ids = list(latest_order_by_customer.values())
+        if latest_order_ids:
+            measurement_rows = db.query(
+                OrderMeasurement.order_id, OrderMeasurement.field_name, OrderMeasurement.value
+            ).filter(OrderMeasurement.order_id.in_(latest_order_ids)).all()
+            for order_id, field_name, value in measurement_rows:
+                measurements_by_order[order_id][field_name] = value
     out = []
     for c in customers:
-        orders = db.query(Order).filter(Order.customer_id == c.id).all()
-        total_spent = sum(o.total_amount for o in orders)
-        last_measurements = {}
-        if orders:
-            latest_order = orders[-1]
-            ms = db.query(OrderMeasurement).filter(OrderMeasurement.order_id == latest_order.id).all()
-            last_measurements = {m.field_name: m.value for m in ms}
+        customer_orders = orders_by_customer.get(c.id, [])
+        total_spent = sum(amount for _, amount in customer_orders)
+        latest_order_id = latest_order_by_customer.get(c.id)
+        last_measurements = measurements_by_order.get(latest_order_id, {}) if latest_order_id else {}
         out.append({
             "id": c.id,
             "cust_code": f"CUST-{c.id:03d}",
@@ -1128,7 +1362,7 @@ def list_customers(
             "city": c.city,
             "notes": c.notes,
             "total_spent": total_spent,
-            "order_count": len(orders),
+            "order_count": len(customer_orders),
             "last_measurements": last_measurements
         })
     return {"items": out, "total": total, "limit": limit, "offset": offset}
@@ -1196,6 +1430,9 @@ def delete_customer(
                 synchronize_session=False
             )
             db.delete(order)
+        # Flush the dependent order rows before deleting the parent customer.
+        # There is no ORM relationship, so SQLAlchemy cannot infer this order.
+        db.flush()
         db.delete(customer)
         db.commit()
     except StorageError as exc:
@@ -1224,11 +1461,14 @@ def get_templates(db: Session = Depends(get_db), _: Admin = Depends(require_admi
 def create_template(req: TemplateCreate, db: Session = Depends(get_db), _: Admin = Depends(require_admin)):
     tmpl = MeasurementTemplate(name=req.name)
     db.add(tmpl)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A measurement template with that name already exists") from exc
     db.refresh(tmpl)
     for idx, f_name in enumerate(req.fields):
-        if f_name.strip():
-            db.add(MeasurementField(template_id=tmpl.id, field_name=f_name.strip(), unit="inch", sort_order=idx))
+        db.add(MeasurementField(template_id=tmpl.id, field_name=f_name, unit="inch", sort_order=idx))
     db.commit()
     return {"status": "ok", "id": tmpl.id}
 
@@ -1242,7 +1482,11 @@ def get_products(db: Session = Depends(get_db), _: Admin = Depends(require_admin
 def add_product(req: ProductCreate, db: Session = Depends(get_db), _: Admin = Depends(require_admin)):
     p = Product(**req.model_dump(), active=True)
     db.add(p)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A product with that name already exists") from exc
     db.refresh(p)
     return p
 
@@ -1286,11 +1530,28 @@ def list_orders(
     query = db.query(Order)
     total = query.count()
     orders = query.order_by(Order.id.desc()).offset(offset).limit(limit).all()
+    order_ids = [o.id for o in orders]
+    customer_ids = {o.customer_id for o in orders}
+    product_ids = {o.product_id for o in orders}
+    customers_by_id = {
+        customer.id: customer
+        for customer in db.query(Customer).filter(Customer.id.in_(customer_ids)).all()
+    } if customer_ids else {}
+    products_by_id = {
+        product.id: product
+        for product in db.query(Product).filter(Product.id.in_(product_ids)).all()
+    } if product_ids else {}
+    measurements_by_order: dict[int, list[OrderMeasurement]] = defaultdict(list)
+    if order_ids:
+        for measurement in db.query(OrderMeasurement).filter(
+            OrderMeasurement.order_id.in_(order_ids)
+        ).all():
+            measurements_by_order[measurement.order_id].append(measurement)
     out = []
     for o in orders:
-        cust = db.query(Customer).filter(Customer.id == o.customer_id).first()
-        prod = db.query(Product).filter(Product.id == o.product_id).first()
-        ms = db.query(OrderMeasurement).filter(OrderMeasurement.order_id == o.id).all()
+        cust = customers_by_id.get(o.customer_id)
+        prod = products_by_id.get(o.product_id)
+        ms = measurements_by_order.get(o.id, [])
         out.append({
             "id": o.id,
             "invoice_number": o.invoice_number,
@@ -1586,6 +1847,8 @@ def get_finance(
     db: Session = Depends(get_db),
     _: Admin = Depends(require_admin),
 ):
+    start_date = _query_date(start_date, "start_date")
+    end_date = _query_date(end_date, "end_date")
     tx_query = db.query(Transaction)
     ord_query = db.query(Order)
     if start_date:
@@ -1657,6 +1920,8 @@ def finance_transactions(
     end_date: Optional[str],
     db: Session,
 ):
+    start_date = _query_date(start_date, "start_date")
+    end_date = _query_date(end_date, "end_date")
     query = db.query(Transaction)
     if start_date:
         query = query.filter(Transaction.date >= start_date)
@@ -1676,19 +1941,27 @@ def export_finance_csv(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Date", "Type", "Category", "Description", "Amount", "Payment Method", "Reference"])
+
+    def csv_safe(value) -> str:
+        """Prevent spreadsheet formula injection when the owner opens the export."""
+        text = "" if value is None else str(value)
+        if text.startswith(("=", "+", "-", "@", "\t", "\r")):
+            return "'" + text
+        return text
+
     for transaction in transactions:
         writer.writerow([
-            transaction.date,
-            transaction.type,
-            transaction.category,
-            transaction.description,
-            transaction.amount,
-            transaction.payment_method,
-            transaction.reference,
+            csv_safe(transaction.date),
+            csv_safe(transaction.type),
+            csv_safe(transaction.category),
+            csv_safe(transaction.description),
+            csv_safe(transaction.amount),
+            csv_safe(transaction.payment_method),
+            csv_safe(transaction.reference),
         ])
     filename = f"lalithas-finance-{start_date or 'all-time'}-to-{end_date or 'today'}.csv"
-    return StreamingResponse(
-        iter([output.getvalue()]),
+    return Response(
+        content=output.getvalue(),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
@@ -1746,8 +2019,8 @@ def export_finance_pdf(
     report.save()
     pdf_buffer.seek(0)
     filename = f"lalithas-finance-{start_date or 'all-time'}-to-{end_date or 'today'}.pdf"
-    return StreamingResponse(
-        pdf_buffer,
+    return Response(
+        content=pdf_buffer.getvalue(),
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
