@@ -878,6 +878,25 @@ class CustomerCreate(BaseModel):
         return _nonblank(value, info.field_name)
 
 
+class CustomerUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    phone: Optional[str] = Field(default=None, min_length=3, max_length=30)
+    alternate_phone: Optional[str] = Field(default=None, max_length=30)
+    address: Optional[str] = Field(default=None, max_length=240)
+    city: Optional[str] = Field(default=None, max_length=80)
+    notes: Optional[str] = Field(default=None, max_length=1000)
+
+    @field_validator("name", "phone", "alternate_phone", "address", "city", "notes")
+    @classmethod
+    def strip_text(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("name", "phone")
+    @classmethod
+    def required_text(cls, value: Optional[str], info) -> Optional[str]:
+        return value if value is None else _nonblank(value, info.field_name)
+
+
 class ProductCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     pricing_type: str
@@ -1442,6 +1461,32 @@ def create_customer(c: CustomerCreate, db: Session = Depends(get_db), _: Admin =
         db.commit()
     db.refresh(cust)
     return cust
+
+
+@app.put("/api/customers/{customer_id}")
+def update_customer(
+    customer_id: int,
+    c: CustomerUpdate,
+    db: Session = Depends(get_db),
+    _: Admin = Depends(require_admin),
+):
+    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    updates = c.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=422, detail="No fields were provided for the update")
+    for field in ("name", "phone"):
+        if field in updates and updates[field] is None:
+            raise HTTPException(status_code=422, detail=f"{field} cannot be null")
+    for key, value in updates.items():
+        if value is None:
+            value = ""
+        setattr(customer, key, value)
+    db.commit()
+    db.refresh(customer)
+    return customer
 
 
 def remove_order_assets(order: Order) -> None:

@@ -2,23 +2,23 @@
 > embroidery-billing-frontend@1.0.0 test
 > node --test src/voice/*.test.js
 
-✔ resampleTo16k halves a 32 kHz signal (1.131958ms)
-✔ resampleTo16k keeps already-16 kHz audio untouched (0.091875ms)
-✔ rms reports silence and a known amplitude (0.084333ms)
-✔ modelDisplayName is a safe short label (0.074167ms)
-✔ speechLanguage defaults safely to English (0.066666ms)
-✔ Tamil and Tanglish select the multilingual small model (0.098959ms)
-✔ speechCapabilities fails closed outside a browser (0.085333ms)
-✔ formatMoney uses Indian formatting and two decimals (14.07725ms)
-✔ exactAmount keeps paise and strips trailing zeros (0.094042ms)
-✔ confirmation phrases match the server-side phrase format (0.131917ms)
-✔ pendingTitle falls back safely (0.068792ms)
-✔ previewRows hides empty values and formats money (1.102083ms)
-✔ parseApiError handles FastAPI detail shapes (0.092042ms)
-✔ canUseMicrophone detects browser support (0.619708ms)
-✔ speechLanguage chooses Tamil for Tamil script (0.101375ms)
-✔ buildDraftPatch trims, filters empty measurements, and validates amounts (0.158833ms)
-✔ draftFromState prefers the live draft and falls back to the preview (0.156542ms)
+✔ resampleTo16k halves a 32 kHz signal (1.127292ms)
+✔ resampleTo16k keeps already-16 kHz audio untouched (0.081292ms)
+✔ rms reports silence and a known amplitude (0.074625ms)
+✔ modelDisplayName is a safe short label (0.069333ms)
+✔ speechLanguage defaults safely to English (0.061042ms)
+✔ Tamil and Tanglish select the multilingual small model (0.089542ms)
+✔ speechCapabilities fails closed outside a browser (0.081208ms)
+✔ formatMoney uses Indian formatting and two decimals (13.110125ms)
+✔ exactAmount keeps paise and strips trailing zeros (0.092792ms)
+✔ confirmation phrases match the server-side phrase format (0.123ms)
+✔ pendingTitle falls back safely (0.069125ms)
+✔ previewRows hides empty values and formats money (1.077875ms)
+✔ parseApiError handles FastAPI detail shapes (0.089542ms)
+✔ canUseMicrophone detects browser support (0.607042ms)
+✔ speechLanguage chooses Tamil for Tamil script (0.100625ms)
+✔ buildDraftPatch trims, filters empty measurements, and validates amounts (0.156209ms)
+✔ draftFromState prefers the live draft and falls back to the preview (0.149875ms)
 ℹ tests 17
 ℹ suites 0
 ℹ pass 17
@@ -26,4 +26,4 @@
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 113.209208
+ℹ duration_ms 104.852417

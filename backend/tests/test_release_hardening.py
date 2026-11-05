@@ -479,3 +479,131 @@ def test_primary_key_conflict_detection() -> None:
 
     unique = IntegrityError("INSERT", {}, Orig("ux_customers_phone"))
     assert not main.is_primary_key_conflict(unique)
+
+
+def test_customer_update_applies_partial_and_full_changes(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        headers = login(client)
+        created = client.post("/api/customers", headers=headers, json={
+            "name": "Original Name",
+            "phone": "9000011111",
+            "alternate_phone": "9000022222",
+            "address": "Old Address",
+            "city": "Madurai",
+            "notes": "Old note",
+        })
+        assert created.status_code == 200, created.text
+        customer = created.json()
+
+        # Partial update must leave every other field untouched.
+        partial = client.put(
+            f"/api/customers/{customer['id']}",
+            headers=headers,
+            json={"name": "  Renamed Customer  "},
+        )
+        assert partial.status_code == 200, partial.text
+        body = partial.json()
+        assert body["name"] == "Renamed Customer"
+        assert body["phone"] == "9000011111"
+        assert body["alternate_phone"] == "9000022222"
+        assert body["address"] == "Old Address"
+        assert body["city"] == "Madurai"
+        assert body["notes"] == "Old note"
+
+        # Full update replaces every editable field.
+        full = client.put(
+            f"/api/customers/{customer['id']}",
+            headers=headers,
+            json={
+                "name": "Fully Updated",
+                "phone": "9000033333",
+                "alternate_phone": "9000044444",
+                "address": "New Address",
+                "city": "Chennai",
+                "notes": "New note",
+            },
+        )
+        assert full.status_code == 200, full.text
+        assert full.json()["name"] == "Fully Updated"
+        assert full.json()["phone"] == "9000033333"
+        assert full.json()["city"] == "Chennai"
+
+        # A reload must return the persisted values.
+        listing = page_items(client.get("/api/customers", headers=headers, params={"q": "Fully Updated"}))
+        assert len(listing) == 1
+        assert listing[0]["id"] == customer["id"]
+        assert listing[0]["notes"] == "New note"
+
+
+def test_customer_update_clears_optional_fields_and_keeps_orders(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        headers = login(client)
+        customer = client.post("/api/customers", headers=headers, json={
+            "name": "Optional Fields",
+            "phone": "9000055555",
+            "alternate_phone": "9000066666",
+            "address": "Somewhere",
+            "city": "Madurai",
+            "notes": "Keep me?",
+        }).json()
+        product = next(p for p in client.get("/api/products", headers=headers).json() if p["name"] == "Normal Blouse")
+        order = client.post("/api/orders", headers=headers, json={
+            "customer_id": customer["id"],
+            "product_id": product["id"],
+            "order_date": "2026-11-03",
+            "delivery_date": "2026-11-10",
+            "base_amount": 500,
+            "total_amount": 500,
+            "paid_amount": 0,
+            "measurements": measurements_for(client, headers, product["id"]),
+            "idempotency_key": str(uuid4()),
+        })
+        assert order.status_code == 200, order.text
+
+        cleared = client.put(
+            f"/api/customers/{customer['id']}",
+            headers=headers,
+            json={"alternate_phone": None, "address": "", "notes": None},
+        )
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["alternate_phone"] == ""
+        assert cleared.json()["address"] == ""
+        assert cleared.json()["notes"] == ""
+        assert cleared.json()["name"] == "Optional Fields"
+        assert cleared.json()["phone"] == "9000055555"
+
+        # Editing a customer must never delete or alter their orders.
+        orders = client.get("/api/orders", headers=headers, params={"limit": 250}).json()["items"]
+        assert any(item["id"] == order.json()["id"] for item in orders)
+
+
+def test_customer_update_rejects_invalid_requests(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        headers = login(client)
+        customer = client.post("/api/customers", headers=headers, json={
+            "name": "Validation Target", "phone": "9000077777"
+        }).json()
+
+        assert client.put("/api/customers/999999", headers=headers, json={"name": "Ghost"}).status_code == 404
+        assert client.put(f"/api/customers/{customer['id']}", headers=headers, json={}).status_code == 422
+        assert client.put(f"/api/customers/{customer['id']}", headers=headers, json={"name": "   "}).status_code == 422
+        assert client.put(f"/api/customers/{customer['id']}", headers=headers, json={"name": None}).status_code == 422
+        assert client.put(f"/api/customers/{customer['id']}", headers=headers, json={"phone": ""}).status_code == 422
+        assert client.put(f"/api/customers/{customer['id']}", headers=headers, json={"phone": None}).status_code == 422
+        assert client.put(f"/api/customers/{customer['id']}", headers=headers, json={"city": "x" * 81}).status_code == 422
+
+        # The rejected requests must not have changed the record.
+        unchanged = page_items(client.get("/api/customers", headers=headers, params={"q": "Validation Target"}))[0]
+        assert unchanged["name"] == "Validation Target"
+        assert unchanged["phone"] == "9000077777"
+
+
+def test_customer_update_requires_authentication(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        headers = login(client)
+        customer = client.post("/api/customers", headers=headers, json={
+            "name": "Auth Target", "phone": "9000088888"
+        }).json()
+        assert client.put(f"/api/customers/{customer['id']}", json={"name": "Hacked"}).status_code == 401
+        unchanged = page_items(client.get("/api/customers", headers=headers, params={"q": "Auth Target"}))[0]
+        assert unchanged["name"] == "Auth Target"

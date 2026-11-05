@@ -1,0 +1,102 @@
+{
+  "base_url": "http://localhost:5181",
+  "started_at": "2026-11-05T10:58:11.553Z",
+  "update_payload": {
+    "name": "Edit Smoke 1793876291553",
+    "phone": "9000291553",
+    "alternate_phone": "9000111222",
+    "address": "Edited Address 42",
+    "city": "Chennai",
+    "notes": "Edited by browser smoke test"
+  },
+  "steps": {
+    "login": {
+      "ok": true,
+      "ms": 1002,
+      "logged_in": true
+    },
+    "open_customers": {
+      "ok": true,
+      "ms": 152,
+      "edit_button_count": 100,
+      "first_card": "Lalitha's Apparel Apparel studio Dashboard New Order Orders Customers Products Finance Backup Local Database Restore From Backup File Supabase Storage Backup Not Configured Logout Local workspace A + Add Customer Save Customer Customer Directory Saved measurements and order history Aarthi Voicecheck (CUST-123) 9123456780 • , Madurai 7 Orders Total Spent: ₹4700 Edit customer Delete customer Load Cu"
+    },
+    "open_edit_modal": {
+      "ok": true,
+      "ms": 137,
+      "dialog_visible": true,
+      "prefilled_fields": {
+        "name": "Aarthi Voicecheck",
+        "phone": "9123456780",
+        "alternate_phone": "",
+        "address": "",
+        "city": "Madurai",
+        "notes": ""
+      }
+    },
+    "cancel_does_not_save": {
+      "ok": true,
+      "ms": 65,
+      "modal_closed": true,
+      "cancelled_text_absent": true
+    },
+    "save_customer_edit": {
+      "ok": true,
+      "ms": 1196,
+      "status": 200,
+      "response": {
+        "name": "Edit Smoke 1793876291553",
+        "phone": "9000291553",
+        "address": "Edited Address 42",
+        "notes": "Edited by browser smoke test",
+        "id": 123,
+        "alternate_phone": "9000111222",
+        "city": "Chennai",
+        "created_at": "2026-11-05"
+      },
+      "modal_closed": true
+    },
+    "card_reflects_update": {
+      "ok": true,
+      "ms": 887,
+      "shows_new_name": true,
+      "shows_new_phone": true,
+      "shows_new_city": true,
+      "still_shows_cancelled_text": false
+    },
+    "reload_persists": {
+      "ok": true,
+      "ms": 1765,
+      "shows_new_name_after_reload": true,
+      "shows_new_phone_after_reload": true,
+      "shows_new_city_after_reload": true
+    },
+    "validation_blocks_blank_name": {
+      "ok": true,
+      "ms": 159,
+      "has_required_attribute_or_validation": true,
+      "empty_value_invalid": true
+    },
+    "mobile_modal_layout": {
+      "ok": true,
+      "ms": 982,
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "horizontal_overflow": false
+    }
+  },
+  "dialogs": [
+    {
+      "type": "alert",
+      "message": "Customer updated successfully."
+    }
+  ],
+  "console_errors": [],
+  "page_errors": [],
+  "failed_requests": [],
+  "passed": true,
+  "console_error_count": 0,
+  "page_error_count": 0,
+  "failed_request_count": 0,
+  "finished_at": "2026-11-05T10:58:18.460Z"
+}

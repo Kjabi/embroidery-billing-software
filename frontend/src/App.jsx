@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Users, Scissors, FilePlus2, Receipt, Wallet,
   Download, MessageCircle, Plus, CheckCircle2, DatabaseBackup, LogOut,
   Search, Bell, Clock3, ClipboardCheck, Palette, Package, Settings2, ChevronRight,
-  FileUp, Trash2
+  FileUp, Trash2, Pencil, X
 } from 'lucide-react';
 import {
   AreaChart, Area, BarChart, Bar, Cell, LineChart, Line, Pie, PieChart, XAxis, YAxis,
@@ -54,6 +54,9 @@ export default function App() {
 
   // Forms
   const [newCust, setNewCust] = useState({ name: "", phone: "", alternate_phone: "", address: "", city: "Madurai", notes: "" });
+  const [editingCustomer, setEditingCustomer] = useState(null);
+  const [editCust, setEditCust] = useState({ name: "", phone: "", alternate_phone: "", address: "", city: "Madurai", notes: "" });
+  const [savingCustomer, setSavingCustomer] = useState(false);
   const [newProd, setNewProd] = useState({ name: "", pricing_type: "MANUAL", base_price: 500, measurement_template_id: "" });
   const [newTmpl, setNewTmpl] = useState({ name: "", fieldsCSV: "Bust, Waist, Shoulder, Sleeve Length" });
   const [newTx, setNewTx] = useState({
@@ -257,6 +260,46 @@ export default function App() {
       return;
     }
     await loadAll();
+  };
+
+  const startEditCustomer = (customer) => {
+    setEditingCustomer(customer);
+    setEditCust({
+      name: customer.name || "",
+      phone: customer.phone || "",
+      alternate_phone: customer.alternate_phone || "",
+      address: customer.address || "",
+      city: customer.city || "Madurai",
+      notes: customer.notes || "",
+    });
+  };
+
+  const saveCustomerEdit = async (e) => {
+    e.preventDefault();
+    if (!editingCustomer || savingCustomer) return;
+    setSavingCustomer(true);
+    try {
+      const response = await apiFetch(`${API}/customers/${editingCustomer.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editCust),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 401) {
+          logout();
+          throw new Error("Your session expired. Please log in again.");
+        }
+        throw new Error(result.detail || "Customer could not be updated.");
+      }
+      setEditingCustomer(null);
+      await loadAll();
+      alert("Customer updated successfully.");
+    } catch (error) {
+      alert(error.message || "Customer could not be updated. Check that the backend is running.");
+    } finally {
+      setSavingCustomer(false);
+    }
   };
 
   useEffect(() => {
@@ -1250,17 +1293,131 @@ export default function App() {
                     <div className="flex items-start justify-between gap-3 border-t border-slate-800 pt-3 sm:block sm:border-t-0 sm:pt-0 sm:text-right">
                       <p className="text-xs text-slate-400">{c.order_count} Orders</p>
                       <p className="font-bold text-sm text-white">Total Spent: ₹{c.total_spent}</p>
-                      <button
-                        onClick={() => removeCustomer(c)}
-                        className="mt-0 px-2.5 py-1.5 rounded bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 text-xs inline-flex items-center gap-1 sm:mt-2"
-                      >
-                        <Trash2 size={12} /> Delete customer
-                      </button>
+                      <div className="mt-2 flex flex-wrap justify-end gap-2">
+                        <button
+                          onClick={() => startEditCustomer(c)}
+                          className="px-2.5 py-1.5 rounded bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 text-xs inline-flex items-center gap-1"
+                        >
+                          <Pencil size={12} /> Edit customer
+                        </button>
+                        <button
+                          onClick={() => removeCustomer(c)}
+                          className="px-2.5 py-1.5 rounded bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 text-xs inline-flex items-center gap-1"
+                        >
+                          <Trash2 size={12} /> Delete customer
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
             </div>
+
+            {editingCustomer && (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="edit-customer-title"
+              >
+                <form
+                  onSubmit={saveCustomerEdit}
+                  className="max-h-[90vh] w-full max-w-lg space-y-3 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-2xl"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 id="edit-customer-title" className="text-base font-bold">Edit customer</h3>
+                      <p className="mt-0.5 text-xs text-slate-400">{editingCustomer.cust_code}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setEditingCustomer(null)}
+                      aria-label="Close edit customer"
+                      className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <div>
+                    <label htmlFor="edit-customer-name" className="text-xs text-slate-400">Customer Name</label>
+                    <input
+                      id="edit-customer-name"
+                      required
+                      value={editCust.name}
+                      onChange={e => setEditCust({ ...editCust, name: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label htmlFor="edit-customer-phone" className="text-xs text-slate-400">Phone Number</label>
+                      <input
+                        id="edit-customer-phone"
+                        required
+                        value={editCust.phone}
+                        onChange={e => setEditCust({ ...editCust, phone: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="edit-customer-alt-phone" className="text-xs text-slate-400">Alternate Phone</label>
+                      <input
+                        id="edit-customer-alt-phone"
+                        value={editCust.alternate_phone}
+                        onChange={e => setEditCust({ ...editCust, alternate_phone: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label htmlFor="edit-customer-address" className="text-xs text-slate-400">Address / Area</label>
+                      <input
+                        id="edit-customer-address"
+                        value={editCust.address}
+                        onChange={e => setEditCust({ ...editCust, address: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="edit-customer-city" className="text-xs text-slate-400">City</label>
+                      <input
+                        id="edit-customer-city"
+                        value={editCust.city}
+                        onChange={e => setEditCust({ ...editCust, city: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor="edit-customer-notes" className="text-xs text-slate-400">Special Notes</label>
+                    <textarea
+                      id="edit-customer-notes"
+                      rows={3}
+                      value={editCust.notes}
+                      onChange={e => setEditCust({ ...editCust, notes: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setEditingCustomer(null)}
+                      className="rounded-lg border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-300 hover:bg-slate-800"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={savingCustomer}
+                      className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {savingCustomer ? "Saving..." : "Save changes"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
           </div>
         )}
 

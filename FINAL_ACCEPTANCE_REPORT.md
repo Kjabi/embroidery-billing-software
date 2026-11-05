@@ -17,7 +17,7 @@ No production data, production credentials, paid service, or destructive product
 
 | Question | Answer |
 | --- | --- |
-| Does the app work end to end? | **Yes for the tested workflows.** Login, dashboard, orders, new order with 9 measurements, PDF invoice, typed voice, and typed voice confirmation all passed in a real Chromium browser. |
+| Does the app work end to end? | **Yes for the tested workflows.** Login, dashboard, orders, new order with 9 measurements, PDF invoice, customer editing, typed voice, and typed voice confirmation all passed in a real Chromium browser. |
 | Does it survive 100 simultaneous users? | **Yes.** 5,298 requests at 57.5 req/s with **0 server errors**, 100/100 voice turns, and 477 orders created in the realistic run. |
 | Does it degrade safely under overload? | **Yes.** 4,648 requests at 101 req/s with **0 errors**; 80 requests received the intended `429` voice rate limit and the server stayed healthy. |
 | Is data consistent under concurrency? | **Yes.** 904 orders checked: 0 duplicate invoices, 0 duplicate idempotency keys, 0 overpayments, 0 ledger mismatches, 0 orphan rows. |
@@ -46,6 +46,7 @@ These changes fix genuine defects found during load, security, and edge-case tes
 - PostgreSQL id sequences are realigned with existing rows at startup, and customer creation retries once after an id-sequence collision. This fixes a real `500 duplicate key ... customers_pkey` seen after data was imported with explicit ids.
 - Security headers on API responses.
 - Sanitised validation errors so rejected input is serialisable.
+- Customer records are now editable from the Customer Directory: `PUT /api/customers/{id}` supports partial updates, rejects blank/null names and phones, preserves orders and measurements, and the UI provides an inline edit modal with cancel/save and reload persistence.
 
 ### 2.2 Performance and load behaviour
 
@@ -58,10 +59,10 @@ These changes fix genuine defects found during load, security, and edge-case tes
 
 ### 2.3 New regression coverage
 
-- `backend/tests/test_release_hardening.py`: 22 edge/security cases (including the `/health` alias, SQLite-safe sequence repair, and primary-key-conflict detection).
+- `backend/tests/test_release_hardening.py`: 26 edge/security cases (including customer-edit validation, the `/health` alias, SQLite-safe sequence repair, and primary-key-conflict detection).
 - `backend/scripts/load_test_100.py`: configurable 100-user mixed-workload generator with JSON reporting.
 - `frontend/vite.config.js`: production builds now fail fast if `VITE_API_BASE_URL` is missing, preventing a release that silently points at `undefined`.
-- Full backend suite is now **50 passed** (was 28).
+- Full backend suite is now **54 passed** (was 28).
 
 No database schema change was made by these fixes; migration `0003` remains the production schema requirement.
 
@@ -71,10 +72,11 @@ No database schema change was made by these fixes; migration `0003` remains the 
 
 | Suite | Result | Evidence |
 | --- | --- | --- |
-| Backend `pytest` | **50 passed** | `verification/backend-tests.txt` |
+| Backend `pytest` | **54 passed** | `verification/backend-tests.txt` |
 | Frontend `npm test` | **17 passed** | `verification/frontend-tests.txt` |
 | Frontend production build | **passed** with an explicit API URL; fails fast without it | `verification/frontend-build.txt` |
 | Browser workflow smoke | **passed**, 0 console errors, 0 page errors, 0 failed requests | `verification/browser-smoke.json` |
+| Customer edit browser smoke | **passed**, 0 console errors, 0 page errors, 0 failed requests | `verification/customer-edit-smoke.json` |
 
 The configured build used `VITE_API_BASE_URL=https://api.lalithas.example/api`; that string is present in the emitted bundle. A build without `VITE_API_BASE_URL` now exits with a clear error instead of producing a broken app. The build retains only the existing chunk-size warning.
 
@@ -243,11 +245,12 @@ The frontend was served by Vite and pointed at the production-like backend. Scre
 | Typed voice query | Passed; pending-order reply rendered; no error alert |
 | Multi-turn typed voice order | Passed; amount → delivery date → preview → confirm; `INV-2026-903` created |
 | Confirmation phrase guard | Passed; wrong phrase and wrong amount both `422`; exact phrase created; replay did not duplicate |
-| Mobile 390 × 844 | Passed; no horizontal overflow; navigation visible |
+| Customer edit | Passed; modal prefilled; cancel discarded; save returned `200`; card updated; values persisted after reload; 7 linked orders untouched |
+| Mobile 390 × 844 | Passed; no horizontal overflow; navigation visible; edit modal fits the viewport |
 
 Headless Chromium cannot render the PDF viewer after navigation to a `blob:` URL, so the test verifies the popup opens plus the actual PDF response bytes and `%PDF-` magic. This is not a product defect.
 
-Evidence: `verification/browser-smoke.json`, `verification/voice-confirmation-guard.json`
+Evidence: `verification/browser-smoke.json`, `verification/voice-confirmation-guard.json`, `verification/customer-edit-smoke.json`
 
 ---
 
@@ -368,7 +371,7 @@ After those are available, the deployment runbook in `deploy/oracle-always-free.
 
 | Capability | Implemented | Tested | Deployed |
 | --- | --- | --- | --- |
-| Billing/order/payment/invoice app | Yes | Yes (50 backend, 17 frontend, build) | **No** |
+| Billing/order/payment/invoice app | Yes | Yes (54 backend, 17 frontend, build) | **No** |
 | 100 concurrent users, realistic workload | Yes | **Yes (0 errors, 5,298 requests)** | No |
 | Overload behaviour | Yes | **Yes (0 errors, 80 intended 429s)** | No |
 | Data integrity under concurrency | Yes | **Yes (904 orders, all checks zero)** | No |
@@ -377,6 +380,7 @@ After those are available, the deployment runbook in `deploy/oracle-always-free.
 | Migration `0003` on populated dev clone | Yes | **Yes** | Dev only |
 | Migration `0003` on production | No | No | **No** |
 | Browser login/dashboard/orders/new order/PDF | Yes | **Yes (Chromium)** | No |
+| Customer edit (partial/full/validation/persistence) | Yes | **Yes (Chromium + 4 backend tests)** | No |
 | Typed voice query and confirmed order | Yes | **Yes (Chromium)** | No |
 | Confirmation-phrase guard and replay protection | Yes | **Yes** | No |
 | Browser microphone capture | Yes | **No (permission denied)** | No |
