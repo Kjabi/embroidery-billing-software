@@ -42,7 +42,8 @@ These changes fix genuine defects found during load, security, and edge-case tes
 - Duplicate product/template names now return `409` instead of creating ambiguous records.
 - Customer deletion cascade fixed by flushing child changes before deleting the customer.
 - CSV formula-injection escaping in finance exports.
-- `/api/health` readiness endpoint.
+- `/api/health` readiness endpoint, also served at `/health` for external probes.
+- PostgreSQL id sequences are realigned with existing rows at startup, and customer creation retries once after an id-sequence collision. This fixes a real `500 duplicate key ... customers_pkey` seen after data was imported with explicit ids.
 - Security headers on API responses.
 - Sanitised validation errors so rejected input is serialisable.
 
@@ -57,10 +58,10 @@ These changes fix genuine defects found during load, security, and edge-case tes
 
 ### 2.3 New regression coverage
 
-- `backend/tests/test_release_hardening.py`: 19 edge/security cases.
+- `backend/tests/test_release_hardening.py`: 22 edge/security cases (including the `/health` alias, SQLite-safe sequence repair, and primary-key-conflict detection).
 - `backend/scripts/load_test_100.py`: configurable 100-user mixed-workload generator with JSON reporting.
 - `frontend/vite.config.js`: production builds now fail fast if `VITE_API_BASE_URL` is missing, preventing a release that silently points at `undefined`.
-- Full backend suite is now **47 passed** (was 28).
+- Full backend suite is now **50 passed** (was 28).
 
 No database schema change was made by these fixes; migration `0003` remains the production schema requirement.
 
@@ -70,7 +71,7 @@ No database schema change was made by these fixes; migration `0003` remains the 
 
 | Suite | Result | Evidence |
 | --- | --- | --- |
-| Backend `pytest` | **47 passed** | `verification/backend-tests.txt` |
+| Backend `pytest` | **50 passed** | `verification/backend-tests.txt` |
 | Frontend `npm test` | **17 passed** | `verification/frontend-tests.txt` |
 | Frontend production build | **passed** with an explicit API URL; fails fast without it | `verification/frontend-build.txt` |
 | Browser workflow smoke | **passed**, 0 console errors, 0 page errors, 0 failed requests | `verification/browser-smoke.json` |
@@ -213,6 +214,19 @@ Evidence: `verification/migration-0003.json`
 
 **This was a local development clone, not production Supabase.**
 
+### 5.4 Imported-id sequence repair and `/health` alias — passed
+
+A live run produced `500 duplicate key value violates unique constraint "customers_pkey"` because the PostgreSQL id sequence was behind rows that had been imported with explicit ids. Reproduced on a clone by forcing `customers_id_seq` to `1` while the table maximum was `122`:
+
+- the insert failed as reported;
+- `resync_postgres_sequences()` realigned all 9 serial tables (`customers` → 122, `orders` → 892, measurements → 8,028, and so on);
+- the next customer insert succeeded with id `123`;
+- both `/health` and `/api/health` returned `200 {"status":"ok"}`.
+
+The repair is idempotent, never changes existing rows, and also runs once on startup so a restart heals an imported/restored database. Customer creation additionally retries once on a primary-key collision.
+
+Evidence: `verification/sequence-repair-health.json`
+
 ---
 
 ## 6. Browser workflow verification (real Chromium)
@@ -354,7 +368,7 @@ After those are available, the deployment runbook in `deploy/oracle-always-free.
 
 | Capability | Implemented | Tested | Deployed |
 | --- | --- | --- | --- |
-| Billing/order/payment/invoice app | Yes | Yes (47 backend, 17 frontend, build) | **No** |
+| Billing/order/payment/invoice app | Yes | Yes (50 backend, 17 frontend, build) | **No** |
 | 100 concurrent users, realistic workload | Yes | **Yes (0 errors, 5,298 requests)** | No |
 | Overload behaviour | Yes | **Yes (0 errors, 80 intended 429s)** | No |
 | Data integrity under concurrency | Yes | **Yes (904 orders, all checks zero)** | No |

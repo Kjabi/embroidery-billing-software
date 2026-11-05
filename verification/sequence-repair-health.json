@@ -1,0 +1,48 @@
+{
+  "database": "PostgreSQL clone of the dev database",
+  "sequence_forced_behind_rows": true,
+  "pre_repair": {
+    "max_customer_id": 122,
+    "sequence_value": 1,
+    "insert_failed": true,
+    "duplicate_primary_key_detected": true
+  },
+  "repaired_tables": {
+    "admin": 1,
+    "customers": 122,
+    "embroidery_rates": 2,
+    "measurement_templates": 7,
+    "transactions": 508,
+    "measurement_fields": 53,
+    "products": 14,
+    "orders": 892,
+    "order_measurements": 8028
+  },
+  "health_endpoints": {
+    "/health": [
+      200,
+      {
+        "status": "ok"
+      }
+    ],
+    "/api/health": [
+      200,
+      {
+        "status": "ok"
+      }
+    ]
+  },
+  "post_repair": {
+    "create_customer_status": 200,
+    "created": {
+      "name": "After Repair",
+      "phone": "9000000998",
+      "address": "",
+      "notes": "",
+      "alternate_phone": "",
+      "id": 123,
+      "city": "Madurai",
+      "created_at": "2026-11-05"
+    }
+  }
+}

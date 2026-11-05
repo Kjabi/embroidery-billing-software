@@ -444,3 +444,38 @@ def test_malformed_and_oversized_json_are_rejected_cleanly(tmp_path: Path) -> No
             "name": "x" * 5000, "phone": "9000000000"
         })
         assert huge.status_code == 422
+
+
+def test_health_is_available_at_both_paths(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        for path in ("/health", "/api/health"):
+            response = client.get(path)
+            assert response.status_code == 200, response.text
+            assert response.json() == {"status": "ok"}
+
+
+def test_sequence_repair_is_a_noop_on_sqlite(tmp_path: Path) -> None:
+    with make_client(tmp_path):
+        import main
+
+        assert main.resync_postgres_sequences() == {}
+
+
+def test_primary_key_conflict_detection() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    import main
+
+    class Diag:
+        def __init__(self, name: str) -> None:
+            self.constraint_name = name
+
+    class Orig(Exception):
+        def __init__(self, name: str) -> None:
+            self.diag = Diag(name)
+
+    pkey = IntegrityError("INSERT", {}, Orig("customers_pkey"))
+    assert main.is_primary_key_conflict(pkey)
+
+    unique = IntegrityError("INSERT", {}, Orig("ux_customers_phone"))
+    assert not main.is_primary_key_conflict(unique)

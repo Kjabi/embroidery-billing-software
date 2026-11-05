@@ -4,7 +4,7 @@ Generated on 5 November 2026 against the existing application. This directory co
 
 | File | What it proves |
 | --- | --- |
-| `backend-tests.txt` | Backend suite: 47 passed |
+| `backend-tests.txt` | Backend suite: 50 passed |
 | `frontend-tests.txt` | Frontend voice-logic suite: 17 passed |
 | `frontend-build.txt` | Production build with an explicit `VITE_API_BASE_URL` |
 | `load-100-realistic.json` | 100 concurrent users, realistic think time, 0 errors |
@@ -13,6 +13,7 @@ Generated on 5 November 2026 against the existing application. This directory co
 | `restart-recovery.json` | Token, data, invoice sequence, and voice survive restart |
 | `backup-restore.json` | `pg_dump`/`pg_restore` row-count match and writable restore |
 | `migration-0003.json` | Migration applied to a pre-0003 populated clone, then real app write |
+| `sequence-repair-health.json` | Id-sequence repair after an explicit-id import; both health paths return 200 |
 | `browser-smoke.json` | Real Chromium login/dashboard/orders/new order/PDF/voice/mobile |
 | `voice-confirmation-guard.json` | Wrong phrase rejected, exact phrase accepted, replay not duplicated |
 | `screenshots/` | Final browser screenshots (JPEG) |

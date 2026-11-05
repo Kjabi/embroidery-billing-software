@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -33,7 +34,7 @@ from storage import (
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Boolean, Text, ForeignKey, inspect, text, event
 )
-from sqlalchemy.exc import IntegrityError, TimeoutError as SQLAlchemyTimeoutError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 
 from reportlab.lib.pagesizes import A4
@@ -614,9 +615,63 @@ def seed_database():
 if not IS_SERVERLESS_DEPLOYMENT:
     seed_database()
 
+def resync_postgres_sequences() -> dict[str, int]:
+    """Align serial sequences with existing primary keys.
+
+    Rows imported or restored with explicit ids leave the table's serial
+    sequence behind the maximum id, so the next insert fails with a duplicate
+    primary key. ``setval`` is idempotent and never changes existing rows.
+    """
+    if PRIMARY_DATABASE_URL.startswith("sqlite"):
+        return {}
+
+    repaired: dict[str, int] = {}
+    with engine.begin() as connection:
+        for table in Base.metadata.sorted_tables:
+            primary_keys = list(table.primary_key.columns)
+            if len(primary_keys) != 1:
+                continue
+            primary_key = primary_keys[0]
+            if not isinstance(primary_key.type, Integer):
+                continue
+            sequence = connection.execute(
+                text("SELECT pg_get_serial_sequence(:table_name, :column_name)"),
+                {"table_name": table.name, "column_name": primary_key.name},
+            ).scalar()
+            if not sequence:
+                continue
+            max_id = connection.execute(
+                text(f'SELECT COALESCE(MAX("{primary_key.name}"), 0) FROM "{table.name}"')
+            ).scalar() or 0
+            connection.execute(
+                text("SELECT setval(:sequence, :next_value, false)"),
+                {"sequence": sequence, "next_value": int(max_id) + 1},
+            )
+            repaired[table.name] = int(max_id)
+    return repaired
+
+
+def is_primary_key_conflict(exc: IntegrityError) -> bool:
+    """True when an insert failed because an id sequence is behind the table."""
+    constraint = getattr(getattr(exc, "orig", None), "diag", None)
+    constraint_name = getattr(constraint, "constraint_name", "") or ""
+    return constraint_name.endswith("_pkey") or "_pkey" in str(exc)
+
+
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
     """Fail closed in production unless the persistent session/snapshot schema is present."""
+    # Repair id sequences before serving traffic. This is safe for SQLite and
+    # for PostgreSQL, and fixes duplicate-key failures after a data import.
+    logger = logging.getLogger(__name__)
+    try:
+        repaired = resync_postgres_sequences()
+        if repaired:
+            logger.info("Resynced PostgreSQL id sequences: %s", repaired)
+    except SQLAlchemyError as exc:
+        # A restricted role may not own the sequences. Serving reads is still
+        # better than failing to start; the repair can be run by an operator.
+        logger.warning("Could not resync PostgreSQL id sequences: %s", exc)
     if IS_SERVERLESS_DEPLOYMENT:
         try:
             order_columns = {column["name"] for column in inspect(engine).get_columns("orders")}
@@ -1112,6 +1167,7 @@ def generate_invoice_pdf(
 
 
 # --- API ENDPOINTS ---
+@app.get("/health", include_in_schema=False)
 @app.get("/api/health")
 def health(db: Session = Depends(get_db)):
     """Lightweight readiness probe used by load balancers and monitoring."""
@@ -1372,7 +1428,18 @@ def list_customers(
 def create_customer(c: CustomerCreate, db: Session = Depends(get_db), _: Admin = Depends(require_admin)):
     cust = Customer(**c.model_dump())
     db.add(cust)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if not is_primary_key_conflict(exc):
+            raise
+        # A restore/import can leave the id sequence behind the table. Repair
+        # it once and retry rather than surfacing a 500 to the operator.
+        resync_postgres_sequences()
+        cust = Customer(**c.model_dump())
+        db.add(cust)
+        db.commit()
     db.refresh(cust)
     return cust
 

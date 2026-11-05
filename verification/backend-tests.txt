@@ -1,23 +1,23 @@
-...............................................                          [100%]
+..................................................                       [100%]
 =============================== warnings summary ===============================
 ../.venv/lib/python3.14/site-packages/starlette/testclient.py:40
   /Users/abisheekkj/Documents/embroidery-management/.venv/lib/python3.14/site-packages/starlette/testclient.py:40: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
     _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
 
-tests/test_release_hardening.py: 842 warnings
-tests/test_security_and_orders.py: 718 warnings
+tests/test_release_hardening.py: 944 warnings
+tests/test_security_and_orders.py: 735 warnings
   /Users/abisheekkj/Documents/embroidery-management/.venv/lib/python3.14/site-packages/starlette/_utils.py:40: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
     return asyncio.iscoroutinefunction(obj) or (callable(obj) and asyncio.iscoroutinefunction(obj.__call__))
 
-tests/test_release_hardening.py: 680 warnings
-tests/test_security_and_orders.py: 578 warnings
+tests/test_release_hardening.py: 770 warnings
+tests/test_security_and_orders.py: 595 warnings
   /Users/abisheekkj/Documents/embroidery-management/.venv/lib/python3.14/site-packages/fastapi/routing.py:233: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
     is_coroutine = asyncio.iscoroutinefunction(dependant.call)
 
 tests/test_release_hardening.py: 17 warnings
 tests/test_security_and_orders.py: 16 warnings
-  /Users/abisheekkj/Documents/embroidery-management/backend/main.py:319: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  /Users/abisheekkj/Documents/embroidery-management/backend/main.py:320: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
     created_at = Column(String, default=lambda: datetime.utcnow().isoformat())
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-47 passed, 2852 warnings in 14.54s
+50 passed, 3078 warnings in 14.67s
