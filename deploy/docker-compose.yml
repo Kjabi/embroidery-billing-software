@@ -38,6 +38,8 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
+      # Built SPA (frontend/dist). Build it before starting Compose.
+      - ../frontend/dist:/srv/app:ro
       - caddy_data:/data
       - caddy_config:/config
     restart: unless-stopped

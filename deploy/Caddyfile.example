@@ -1,16 +1,35 @@
-# Caddy obtains and renews a free Let's Encrypt certificate for BACKEND_DOMAIN.
-# Point that DNS name at the Oracle instance before starting Compose.
+# Single-origin deployment: Caddy serves the built SPA and proxies /api to FastAPI.
+# Point BACKEND_DOMAIN (the app domain) at the Oracle instance before starting Compose.
+#
+# Build the frontend on the host or in CI first:
+#   cd frontend
+#   VITE_API_BASE_URL=/api VITE_VOICE_ENABLED=false npm run build
+# The compose file mounts ../frontend/dist at /srv/app read-only.
 {$BACKEND_DOMAIN} {
 	encode zstd gzip
 
-	reverse_proxy backend:8000
+	# API requests go to the backend. Keep this before the SPA fallback.
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# Static SPA with client-side routing fallback.
+	handle {
+		root * /srv/app
+		try_files {path} /index.html
+		file_server
+	}
 
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
-		Permissions-Policy "microphone=(self), camera=(), geolocation=()"
+		# Voice is disabled in this deployment, so the microphone is blocked.
+		# Before re-enabling voice (VITE_VOICE_ENABLED=true), change this to
+		# "microphone=(self), camera=(), geolocation=()" and re-run the
+		# physical microphone acceptance matrix.
+		Permissions-Policy "microphone=(), camera=(), geolocation=()"
 		-Server
 	}
 }

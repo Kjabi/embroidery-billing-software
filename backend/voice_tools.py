@@ -14,7 +14,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import func, or_
@@ -37,6 +37,24 @@ def _m():
     import main
 
     return main
+
+
+def customer_required_fields() -> list[str]:
+    """Return the required customer fields from the live API validation model.
+
+    The voice workflow must not invent mandatory fields.  ``CustomerCreate`` is
+    the exact Pydantic contract used by the authenticated ``POST /api/customers``
+    route, so the conversational workflow asks only for fields that it requires.
+    """
+    try:
+        model = _m().CustomerCreate
+        fields = getattr(model, "model_fields", {})
+        required = [name for name, info in fields.items() if info.is_required()]
+        if required:
+            return required
+    except Exception:  # pragma: no cover - only for unusual import failures
+        pass
+    return ["name", "phone"]
 
 
 def _ok(**payload: Any) -> dict[str, Any]:
@@ -168,6 +186,49 @@ class OrderUpdateArgs(_Strict):
 class InvoiceArgs(_Strict):
     order_id: Optional[int] = Field(default=None, ge=1)
     invoice_number: Optional[str] = Field(default=None, max_length=40)
+
+
+class BusinessQueryArgs(_Strict):
+    """Validated read-only query plan produced by the local language model."""
+
+    entity: Literal[
+        "customers", "orders", "products", "measurements",
+        "transactions", "payments", "balances", "sales",
+    ]
+    operation: Literal[
+        "search", "count", "list", "retrieve", "sum", "average",
+        "group", "compare", "summarize",
+    ]
+    search: Optional[str] = Field(default=None, max_length=120)
+    customer_name: Optional[str] = Field(default=None, max_length=120)
+    product_name: Optional[str] = Field(default=None, max_length=120)
+    status: Optional[str] = Field(default=None, max_length=40)
+    date_start: Optional[str] = Field(default=None, max_length=20)
+    date_end: Optional[str] = Field(default=None, max_length=20)
+    amount_min: Optional[float] = Field(default=None, ge=0, le=100_000_000)
+    amount_max: Optional[float] = Field(default=None, ge=0, le=100_000_000)
+    sort_by: Literal["date", "amount", "balance", "name", "id"] = "id"
+    sort_direction: Literal["asc", "desc"] = "desc"
+    group_by: Optional[Literal["date", "month", "status", "customer", "product", "category"]] = None
+    limit: int = Field(default=20, ge=1, le=50)
+
+    @field_validator("amount_max")
+    @classmethod
+    def amount_range(cls, value: Optional[float], info) -> Optional[float]:
+        minimum = info.data.get("amount_min")
+        if value is not None and minimum is not None and value < minimum:
+            raise ValueError("amount_max must be greater than or equal to amount_min")
+        return value
+
+    @field_validator("date_start", "date_end")
+    @classmethod
+    def valid_date(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        parsed = voice_parsing.parse_date(value)
+        if not parsed:
+            raise ValueError("Dates must be ISO dates or supported spoken dates")
+        return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +818,134 @@ def get_payment_history(args: PeriodArgs, db, conversation) -> dict[str, Any]:
     )
 
 
+def query_business_data(args: BusinessQueryArgs, db, conversation) -> dict[str, Any]:
+    """Execute a bounded, authenticated, read-only business query plan."""
+    m = _m()
+    entity = args.entity
+    if entity == "customers":
+        query = db.query(m.Customer)
+        if args.search or args.customer_name:
+            value = (args.search or args.customer_name or "").strip()
+            query = query.filter(m.Customer.name.ilike(f"%{value}%"))
+        rows = query.order_by(m.Customer.name.asc() if args.sort_direction == "asc" else m.Customer.name.desc()).limit(args.limit).all()
+        if args.operation == "count":
+            return _ok(entity=entity, operation=args.operation, count=query.count())
+        return _ok(
+            entity=entity, operation=args.operation, count=len(rows),
+            customers=[_serialize_customer(db, row, include_history=False) for row in rows],
+        )
+
+    if entity == "products":
+        query = db.query(m.Product).filter(m.Product.active.is_(True))
+        value = (args.search or args.product_name or "").strip()
+        if value:
+            query = query.filter(m.Product.name.ilike(f"%{value}%"))
+        if args.operation == "count":
+            return _ok(entity=entity, operation=args.operation, count=query.count())
+        rows = query.order_by(m.Product.name.asc() if args.sort_direction == "asc" else m.Product.name.desc()).limit(args.limit).all()
+        return _ok(
+            entity=entity, operation=args.operation, count=len(rows),
+            products=[{
+                "product_id": row.id, "name": row.name,
+                "pricing_type": row.pricing_type, "base_price": row.base_price,
+                "required_measurements": _template_fields(row, db),
+            } for row in rows],
+        )
+
+    is_financial = entity in {"transactions", "payments"}
+    if entity in {"orders", "balances", "sales", "measurements"}:
+        query = db.query(m.Order)
+        if args.customer_name:
+            customer_ids = [
+                row.id for row in db.query(m.Customer.id).filter(
+                    m.Customer.name.ilike(f"%{args.customer_name.strip()}%")
+                ).limit(20).all()
+            ]
+            if not customer_ids:
+                return _ok(entity=entity, operation=args.operation, count=0, results=[])
+            query = query.filter(m.Order.customer_id.in_(customer_ids))
+        if args.product_name:
+            product_ids = [
+                row.id for row in db.query(m.Product.id).filter(
+                    m.Product.name.ilike(f"%{args.product_name.strip()}%")
+                ).limit(20).all()
+            ]
+            query = query.filter(m.Order.product_id.in_(product_ids or [-1]))
+        if args.search:
+            value = args.search.strip()
+            query = query.filter(m.Order.invoice_number.ilike(f"%{value}%"))
+        if args.status:
+            status = args.status.strip().lower()
+            if status in {"pending", "unpaid", "outstanding", "due"}:
+                query = query.filter(m.Order.balance > 0)
+            elif status in {"paid", "completed"}:
+                query = query.filter(m.Order.balance == 0)
+            else:
+                query = query.filter(func.lower(m.Order.status) == status)
+        if entity == "balances":
+            query = query.filter(m.Order.balance > 0)
+        if args.date_start:
+            query = query.filter(m.Order.order_date >= args.date_start)
+        if args.date_end:
+            query = query.filter(m.Order.order_date <= args.date_end)
+        if args.amount_min is not None:
+            query = query.filter(m.Order.total_amount >= args.amount_min)
+        if args.amount_max is not None:
+            query = query.filter(m.Order.total_amount <= args.amount_max)
+        if args.operation == "count":
+            return _ok(entity=entity, operation=args.operation, count=query.count())
+        amount_field = m.Order.balance if entity == "balances" else m.Order.total_amount
+        if args.operation in {"sum", "average"}:
+            aggregate = func.sum(amount_field) if args.operation == "sum" else func.avg(amount_field)
+            value = query.with_entities(aggregate).scalar()
+            return _ok(entity=entity, operation=args.operation, value=round(float(value or 0), 2))
+        order_field = {
+            "date": m.Order.order_date, "amount": amount_field,
+            "balance": m.Order.balance, "id": m.Order.id,
+        }.get(args.sort_by, m.Order.id)
+        order_field = order_field.asc() if args.sort_direction == "asc" else order_field.desc()
+        rows = query.order_by(order_field).limit(args.limit).all()
+        return _ok(
+            entity=entity, operation=args.operation, count=len(rows),
+            orders=_serialize_orders(db, rows),
+        )
+
+    if is_financial:
+        query = db.query(m.Transaction).filter(m.Transaction.type == "INCOME" if entity == "payments" else True)
+        if args.search:
+            value = f"%{args.search.strip()}%"
+            query = query.filter(
+                m.Transaction.description.ilike(value) |
+                m.Transaction.category.ilike(value) |
+                m.Transaction.reference.ilike(value)
+            )
+        if args.date_start:
+            query = query.filter(m.Transaction.date >= args.date_start)
+        if args.date_end:
+            query = query.filter(m.Transaction.date <= args.date_end)
+        if args.amount_min is not None:
+            query = query.filter(m.Transaction.amount >= args.amount_min)
+        if args.amount_max is not None:
+            query = query.filter(m.Transaction.amount <= args.amount_max)
+        if args.operation == "count":
+            return _ok(entity=entity, operation=args.operation, count=query.count())
+        if args.operation in {"sum", "average"}:
+            aggregate = func.sum(m.Transaction.amount) if args.operation == "sum" else func.avg(m.Transaction.amount)
+            value = query.with_entities(aggregate).scalar()
+            return _ok(entity=entity, operation=args.operation, value=round(float(value or 0), 2))
+        field = m.Transaction.amount if args.sort_by == "amount" else m.Transaction.date
+        field = field.asc() if args.sort_direction == "asc" else field.desc()
+        rows = query.order_by(field, m.Transaction.id.desc()).limit(args.limit).all()
+        return _ok(entity=entity, operation=args.operation, count=len(rows), transactions=[
+            {"id": row.id, "date": row.date, "type": row.type, "category": row.category,
+             "description": row.description, "amount": row.amount,
+             "payment_method": row.payment_method, "reference": row.reference}
+            for row in rows
+        ])
+
+    return _error("This business entity is not available for read-only queries.")
+
+
 def list_products(args: ProductArgs, db, conversation) -> dict[str, Any]:
     m = _m()
     query = db.query(m.Product).filter(m.Product.active.is_(True))
@@ -1243,25 +1432,51 @@ def execute_pending(pending: PendingOperation, db, admin) -> dict[str, Any]:
             raise VoiceOperationError(
                 f"A customer with phone {customer_data['phone']} already exists: {existing.name}.", 409
             )
-        customer = m.Customer(
-            name=customer_data["name"],
-            phone=customer_data["phone"],
-            alternate_phone=customer_data.get("alternate_phone", ""),
-            address=customer_data.get("address", ""),
-            city=customer_data.get("city", "Madurai"),
-            notes=customer_data.get("notes", ""),
-        )
         try:
-            db.add(customer)
-            db.commit()
-            db.refresh(customer)
-        except Exception:
+            # Use the same validated contract and save function as the
+            # authenticated POST /api/customers route. No ad-hoc SQL is used.
+            validated = m.CustomerCreate(
+                name=customer_data["name"],
+                phone=customer_data["phone"],
+                alternate_phone=customer_data.get("alternate_phone", ""),
+                address=customer_data.get("address", ""),
+                city=customer_data.get("city", "Madurai"),
+                notes=customer_data.get("notes", ""),
+            )
+            saved = m.create_customer_record(validated, db)
+        except Exception as exc:
             db.rollback()
-            raise VoiceOperationError("The customer could not be saved. No record was added.", 500)
+            detail = getattr(exc, "detail", None)
+            if isinstance(detail, str) and detail:
+                raise VoiceOperationError(detail, 422) from exc
+            raise VoiceOperationError(
+                "The customer could not be saved. No record was added.", 500
+            ) from exc
+
+        # Read the record back from the database: never report success from the
+        # in-memory object that was just committed.
+        customer = db.query(m.Customer).filter(m.Customer.id == saved.id).first()
+        if customer is None:
+            raise VoiceOperationError(
+                "The customer save could not be verified. No success was reported.", 500
+            )
         return {
             "ok": True,
-            "message": f"Customer {customer.name} was created with customer code CUST-{customer.id:03d}.",
-            "result": {"customer_id": customer.id, "name": customer.name, "phone": customer.phone},
+            "message": (
+                f"Customer {customer.name} was saved and verified with customer code "
+                f"CUST-{customer.id:03d}, phone {customer.phone}, city {customer.city or 'not set'}."
+            ),
+            "result": {
+                "customer_id": customer.id,
+                "cust_code": f"CUST-{customer.id:03d}",
+                "name": customer.name,
+                "phone": customer.phone,
+                "alternate_phone": customer.alternate_phone or "",
+                "address": customer.address or "",
+                "city": customer.city or "",
+                "notes": customer.notes or "",
+            },
+            "verified": True,
         }
 
     if action == "update_customer":
@@ -1437,6 +1652,11 @@ class ToolSpec:
 
 
 TOOL_SPECS: list[ToolSpec] = [
+    ToolSpec(
+        "query_business_data",
+        "Run one validated read-only query over customers, orders, products, measurements, payments, transactions, balances, or sales. Use this for any business question not covered by a narrower tool. Never add a date filter unless the user asked for one.",
+        BusinessQueryArgs, query_business_data, True,
+    ),
     ToolSpec(
         "get_business_summary",
         "Get live totals for a period: order value, money collected, outstanding balance, order counts, and customer count.",

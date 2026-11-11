@@ -32,7 +32,8 @@ from storage import (
     list_objects as storage_list_objects, verify_private_bucket as storage_verify_private_bucket,
 )
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Boolean, Text, ForeignKey, inspect, text, event
+    create_engine, Column, Integer, String, Float, Boolean, Text, ForeignKey, inspect, text, event,
+    case, func,
 )
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
@@ -73,7 +74,9 @@ FRONTEND_ORIGINS = [
     origin.strip() for origin in os.getenv("FRONTEND_ORIGIN", "http://localhost:5173").split(",") if origin.strip()
 ]
 TOKEN_TTL_SECONDS = int(os.getenv("TOKEN_TTL_SECONDS", "28800"))
-MAX_REFERENCE_IMAGE_BYTES = 5 * 1024 * 1024
+# Vercel Functions cap request bodies at 4.5 MB. Keep the app's limit below that
+# so oversized uploads get the app's friendly 413 instead of a platform error.
+MAX_REFERENCE_IMAGE_BYTES = 4 * 1024 * 1024
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_MAX_FAILURES = 5
 _login_attempts: dict[str, deque[float]] = defaultdict(deque)
@@ -729,6 +732,15 @@ async def add_security_headers(request: Request, call_next):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Permissions-Policy", "microphone=(self), camera=(), geolocation=()")
+    return response
+
+
+@app.middleware("http")
+async def add_process_timing(request: Request, call_next):
+    """Expose server-side request time for authenticated performance checks."""
+    started = time.perf_counter()
+    response = await call_next(request)
+    response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - started) * 1000:.2f}"
     return response
 
 
@@ -1390,6 +1402,81 @@ async def voice_transcribe(
         await audio.close()
 
 
+@app.get("/api/dashboard/summary")
+def dashboard_summary(
+    db: Session = Depends(get_db),
+    _: Admin = Depends(require_admin),
+):
+    """Return only the data needed for the initial dashboard view."""
+    income, expense = db.query(
+        func.coalesce(func.sum(case((Transaction.type == "INCOME", Transaction.amount), else_=0.0)), 0.0),
+        func.coalesce(func.sum(case((Transaction.type == "EXPENSE", Transaction.amount), else_=0.0)), 0.0),
+    ).one()
+    order_stats = db.query(
+        func.count(Order.id),
+        func.coalesce(func.sum(case((Order.balance > 0, 1), else_=0)), 0),
+        func.coalesce(func.sum(case((Order.balance == 0, 1), else_=0)), 0),
+        func.coalesce(func.sum(case(((Order.balance == 0) & (Order.total_amount > 0), 1), else_=0)), 0),
+        func.coalesce(func.sum(case(((Order.paid_amount > 0) & (Order.balance > 0), 1), else_=0)), 0),
+        func.coalesce(func.sum(case(((Order.paid_amount <= 0) & (Order.total_amount > 0), 1), else_=0)), 0),
+        func.coalesce(func.sum(Order.balance), 0.0),
+    ).one()
+    total_orders, pending_orders, completed_orders, paid_orders, partially_paid_orders, unpaid_orders, pending_payments = order_stats
+    today = business_today().isoformat()
+    # Mobile dashboard metrics. "Sales" = order value booked today;
+    # "collection" = money received today against orders (advance + balance).
+    today_sales = db.query(
+        func.coalesce(func.sum(Order.total_amount), 0.0)
+    ).filter(Order.order_date == today).scalar()
+    today_collection = db.query(
+        func.coalesce(func.sum(Transaction.amount), 0.0)
+    ).filter(
+        Transaction.date == today,
+        Transaction.type == "INCOME",
+        Transaction.category.in_(("Order Payment", "Balance Collection")),
+    ).scalar()
+    recent_rows = (
+        db.query(Order, Customer.name, Customer.phone, Product.name)
+        .join(Customer, Customer.id == Order.customer_id)
+        .join(Product, Product.id == Order.product_id)
+        .order_by(Order.id.desc())
+        .limit(6)
+        .all()
+    )
+    recent_orders = [
+        {
+            "id": order.id,
+            "invoice_number": order.invoice_number,
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+            "product_name": product_name,
+            "total_amount": order.total_amount,
+            "paid_amount": order.paid_amount,
+            "balance": order.balance,
+            "status": order.status,
+            "delivery_date": order.delivery_date,
+        }
+        for order, customer_name, customer_phone, product_name in recent_rows
+    ]
+    return {
+        "summary": {
+            "total_income": float(income or 0),
+            "total_expense": float(expense or 0),
+            "net_profit": float((income or 0) - (expense or 0)),
+            "total_orders": int(total_orders or 0),
+            "pending_orders": int(pending_orders or 0),
+            "completed_orders": int(completed_orders or 0),
+            "paid_orders": int(paid_orders or 0),
+            "partially_paid_orders": int(partially_paid_orders or 0),
+            "unpaid_orders": int(unpaid_orders or 0),
+            "pending_payments": float(pending_payments or 0),
+            "today_sales": float(today_sales or 0),
+            "today_collection": float(today_collection or 0),
+        },
+        "recent_orders": recent_orders,
+    }
+
+
 @app.get("/api/customers")
 def list_customers(
     q: Optional[str] = None,
@@ -1404,17 +1491,26 @@ def list_customers(
     total = query.count()
     customers = query.order_by(Customer.id.desc()).offset(offset).limit(limit).all()
     customer_ids = [c.id for c in customers]
-    orders_by_customer: dict[int, list[tuple[int, float]]] = defaultdict(list)
-    latest_order_by_customer: dict[int, int] = {}
+    order_summary_by_customer: dict[int, tuple[int, float, int | None]] = {}
     measurements_by_order: dict[int, dict[str, str]] = defaultdict(dict)
     if customer_ids:
-        order_rows = db.query(Order.id, Order.customer_id, Order.total_amount).filter(
+        order_rows = db.query(
+            Order.customer_id,
+            func.count(Order.id),
+            func.coalesce(func.sum(Order.total_amount), 0.0),
+            func.max(Order.id),
+        ).filter(
             Order.customer_id.in_(customer_ids)
-        ).order_by(Order.id.asc()).all()
-        for order_id, customer_id, total_amount in order_rows:
-            orders_by_customer[customer_id].append((order_id, total_amount))
-            latest_order_by_customer[customer_id] = order_id
-        latest_order_ids = list(latest_order_by_customer.values())
+        ).group_by(Order.customer_id).all()
+        order_summary_by_customer = {
+            customer_id: (int(order_count), float(total_spent), latest_order_id)
+            for customer_id, order_count, total_spent, latest_order_id in order_rows
+        }
+        latest_order_ids = [
+            latest_order_id
+            for _, _, latest_order_id in order_summary_by_customer.values()
+            if latest_order_id is not None
+        ]
         if latest_order_ids:
             measurement_rows = db.query(
                 OrderMeasurement.order_id, OrderMeasurement.field_name, OrderMeasurement.value
@@ -1423,9 +1519,7 @@ def list_customers(
                 measurements_by_order[order_id][field_name] = value
     out = []
     for c in customers:
-        customer_orders = orders_by_customer.get(c.id, [])
-        total_spent = sum(amount for _, amount in customer_orders)
-        latest_order_id = latest_order_by_customer.get(c.id)
+        order_count, total_spent, latest_order_id = order_summary_by_customer.get(c.id, (0, 0.0, None))
         last_measurements = measurements_by_order.get(latest_order_id, {}) if latest_order_id else {}
         out.append({
             "id": c.id,
@@ -1437,14 +1531,19 @@ def list_customers(
             "city": c.city,
             "notes": c.notes,
             "total_spent": total_spent,
-            "order_count": len(customer_orders),
+            "order_count": order_count,
             "last_measurements": last_measurements
         })
     return {"items": out, "total": total, "limit": limit, "offset": offset}
 
 
-@app.post("/api/customers")
-def create_customer(c: CustomerCreate, db: Session = Depends(get_db), _: Admin = Depends(require_admin)):
+def create_customer_record(c: CustomerCreate, db: Session) -> Customer:
+    """Create a customer using the same rules as the authenticated API route.
+
+    The voice confirmation path calls this exact function, so validation,
+    duplicate-key handling, and PostgreSQL sequence repair cannot diverge from
+    the manual admin screen.
+    """
     cust = Customer(**c.model_dump())
     db.add(cust)
     try:
@@ -1461,6 +1560,11 @@ def create_customer(c: CustomerCreate, db: Session = Depends(get_db), _: Admin =
         db.commit()
     db.refresh(cust)
     return cust
+
+
+@app.post("/api/customers")
+def create_customer(c: CustomerCreate, db: Session = Depends(get_db), _: Admin = Depends(require_admin)):
+    return create_customer_record(c, db)
 
 
 @app.put("/api/customers/{customer_id}")
@@ -1690,10 +1794,31 @@ def next_invoice_number(db: Session) -> str:
     year = business_today().year
     if engine.dialect.name == "postgresql":
         sequence_number = db.execute(text("""
-            INSERT INTO invoice_sequences (year, next_number) VALUES (:year, 2)
-            ON CONFLICT (year) DO UPDATE SET next_number = invoice_sequences.next_number + 1
+            INSERT INTO invoice_sequences (year, next_number)
+            SELECT :year,
+                   COALESCE(MAX(
+                       CASE
+                           WHEN invoice_number ~ :invoice_pattern
+                           THEN substring(invoice_number FROM :invoice_suffix)::integer
+                       END
+                   ), 0) + 2
+            FROM orders
+            WHERE invoice_number IS NOT NULL
+            ON CONFLICT (year) DO UPDATE
+                -- Always advance the locked row by one. EXCLUDED.next_number is
+                -- computed from the statement snapshot, so two concurrent first
+                -- allocations can both compute the same value; using only
+                -- GREATEST(current, EXCLUDED) would hand out the same invoice
+                -- number twice. GREATEST(current + 1, EXCLUDED) keeps the
+                -- post-import resync behaviour while guaranteeing a strictly
+                -- larger number for every later caller.
+                SET next_number = GREATEST(invoice_sequences.next_number + 1, EXCLUDED.next_number)
             RETURNING next_number - 1
-        """), {"year": year}).scalar_one()
+        """), {
+            "year": year,
+            "invoice_pattern": rf"^INV-{year}-[0-9]+$",
+            "invoice_suffix": r"([0-9]+)$",
+        }).scalar_one()
     else:
         counter = db.query(InvoiceSequence).filter(InvoiceSequence.year == year).with_for_update().first()
         if counter is None:
@@ -1889,7 +2014,7 @@ def collect_balance(order_id: int, req: PaymentUpdate, db: Session = Depends(get
 
 def validate_reference_image(payload: bytes, content_type: str | None) -> tuple[str, str]:
     if len(payload) > MAX_REFERENCE_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Reference image must be 5 MB or smaller")
+        raise HTTPException(status_code=413, detail="Reference image must be 4 MB or smaller")
     try:
         with Image.open(io.BytesIO(payload)) as image:
             image.verify()
@@ -1971,12 +2096,19 @@ def get_finance(
         ord_query = ord_query.filter(Order.order_date <= end_date)
 
     txs = tx_query.order_by(Transaction.date.desc(), Transaction.id.desc()).all()
-    orders = ord_query.all()
-
     total_income = sum(t.amount for t in txs if t.type == "INCOME")
     total_expense = sum(t.amount for t in txs if t.type == "EXPENSE")
     net_profit = total_income - total_expense
-    pending_payments = sum(o.balance for o in orders)
+    order_summary = ord_query.with_entities(
+        func.count(Order.id),
+        func.coalesce(func.sum(case((Order.balance > 0, 1), else_=0)), 0),
+        func.coalesce(func.sum(case((Order.balance == 0, 1), else_=0)), 0),
+        func.coalesce(func.sum(case(((Order.balance == 0) & (Order.total_amount > 0), 1), else_=0)), 0),
+        func.coalesce(func.sum(case(((Order.paid_amount > 0) & (Order.balance > 0), 1), else_=0)), 0),
+        func.coalesce(func.sum(case(((Order.paid_amount <= 0) & (Order.total_amount > 0), 1), else_=0)), 0),
+        func.coalesce(func.sum(Order.balance), 0.0),
+    ).one()
+    total_orders, pending_order_count, completed_order_count, paid_order_count, partially_paid_count, unpaid_count, pending_payments = order_summary
     income_by_category = {}
     expense_by_category = {}
     for transaction in txs:
@@ -2005,13 +2137,13 @@ def get_finance(
             "total_income": total_income,
             "total_expense": total_expense,
             "net_profit": net_profit,
-            "total_orders": len(orders),
-            "pending_orders": sum(1 for o in orders if o.balance > 0),
-            "completed_orders": sum(1 for o in orders if o.balance == 0),
-            "paid_orders": sum(1 for o in orders if o.balance == 0 and o.total_amount > 0),
-            "partially_paid_orders": sum(1 for o in orders if 0 < o.paid_amount < o.total_amount),
-            "unpaid_orders": sum(1 for o in orders if o.paid_amount <= 0 and o.total_amount > 0),
-            "pending_payments": pending_payments
+            "total_orders": int(total_orders or 0),
+            "pending_orders": int(pending_order_count or 0),
+            "completed_orders": int(completed_order_count or 0),
+            "paid_orders": int(paid_order_count or 0),
+            "partially_paid_orders": int(partially_paid_count or 0),
+            "unpaid_orders": int(unpaid_count or 0),
+            "pending_payments": float(pending_payments or 0)
         },
         "income_by_category": [
             {"category": category, "amount": amount}
@@ -2288,6 +2420,14 @@ def create_cloud_backup_artifacts(db: Session) -> dict:
 def backup_database(db: Session = Depends(get_db), _: Admin = Depends(require_admin)):
     if storage_is_configured():
         return create_cloud_backup_artifacts(db)
+    if IS_SERVERLESS_DEPLOYMENT:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Local file backups are not available on this serverless deployment. "
+                "Configure Supabase Storage credentials to enable cloud backups."
+            ),
+        )
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     dest = os.path.join(BACKUP_DIR, f"backup_{stamp}.db")
     create_sqlite_snapshot(dest)

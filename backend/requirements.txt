@@ -4,7 +4,9 @@ sqlalchemy==2.0.35
 pydantic>=2.12.0,<3
 reportlab==4.2.2
 Pillow>=10.4.0,<12
-python-multipart==0.0.9
+# 0.0.9 had multiple multipart DoS / parameter-smuggling advisories.
+# 0.0.33 is the current patched release and remains compatible with FastAPI 0.115.
+python-multipart==0.0.33
 psycopg[binary]>=3.2.3,<4
 certifi>=2024.8.30
 httpx>=0.27.0,<1

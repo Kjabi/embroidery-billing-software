@@ -68,3 +68,33 @@ def test_default_providers_are_local_and_deterministic(monkeypatch) -> None:
     assert voice_config.stt_provider() == "local"
     assert voice_config.llm_provider() == "deterministic"
     assert voice_config.provider_label() == "Built-in command parser"
+
+
+def test_whispercpp_requires_explicit_binary_and_model(monkeypatch) -> None:
+    monkeypatch.setenv("VOICE_STT_PROVIDER", "whispercpp")
+    monkeypatch.setenv("VOICE_WHISPERCPP_BINARY", "/missing/whisper-cli")
+    monkeypatch.delenv("VOICE_WHISPERCPP_MODEL", raising=False)
+    with pytest.raises(voice_providers.VoiceProviderError) as excinfo:
+        voice_providers.transcribe_audio(b"RIFF", "voice.wav", "ta")
+    assert "executable" in str(excinfo.value)
+
+
+def test_whispercpp_temp_audio_is_deleted(monkeypatch, tmp_path) -> None:
+    binary = tmp_path / "whisper-cli"
+    model = tmp_path / "model.bin"
+    binary.write_text("placeholder")
+    model.write_bytes(b"model")
+    monkeypatch.setenv("VOICE_WHISPERCPP_BINARY", str(binary))
+    monkeypatch.setenv("VOICE_WHISPERCPP_MODEL", str(model))
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["path"] = command[command.index("--file") + 1]
+        captured["exists_during"] = os.path.exists(captured["path"])
+        return SimpleNamespace(returncode=0, stdout=" இன்று விற்பனை எவ்வளவு? ")
+
+    monkeypatch.setattr(voice_providers.subprocess, "run", fake_run)
+    result = voice_providers.WhisperCpp().transcribe(b"RIFF audio", "ignored.wav", "ta")
+    assert result == "இன்று விற்பனை எவ்வளவு?"
+    assert captured["exists_during"] is True
+    assert not os.path.exists(captured["path"])

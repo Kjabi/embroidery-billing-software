@@ -70,7 +70,42 @@ _FIELD_ALIASES: dict[str, list[str]] = {
 
 
 def normalize(text: str) -> str:
-    return " ".join((text or "").casefold().replace("₹", " rs ").split())
+    value = (text or "").casefold().replace("₹", " rs ")
+    value = re.sub(r"[\u0964\u0965!?;:]+", " ", value)
+    return " ".join(value.split())
+
+
+def detect_language(text: str) -> str:
+    """Return the preferred response language without calling an external model."""
+    if re.search(r"[\u0B80-\u0BFF]", text or ""):
+        return "ta"
+    return "en"
+
+
+def business_intent_text(text: str) -> str:
+    """Normalize common spoken business variants while preserving user text."""
+    value = normalize(text)
+    replacements = (
+        (r"\b(?:sales?|seles|selce)\b", "sales"),
+        (r"சேல்ஸ்|சேல்சி|சேல்ஸி|சேல்ஸ", "sales"),
+        (r"விற்பனை|விர்ப்பனை|விருப்பனையே", "sales"),
+        (r"\b(?:evlo|evalo|evvalavu)\b|எவ்ளோ|எவ்வளவு", "how much"),
+        (r"மொத்தம்|மொத்தமாக|mothama|motham", "total"),
+        (r"இன்று|இன்னைக்கு|இன்னிக்கி|இன்னிக்கு|innaiku|innaikku|innikku", "today"),
+        (r"நேற்று|நேத்திக்கு|netru|nethu", "yesterday"),
+        (r"இந்த மாதம்|இந்த மாதத்தோட|இந்த மாசம்|intha maasam|intha matham", "this month"),
+        (r"நடந்திருக்கும்|நடந்திருக்கிறது|நடந்திருக்கு|நடந்துச்சு|வந்திருக்கிறது", "happened"),
+        (r"ஆர்டர்|ஆர்டர்கள்", "order"),
+        (r"விற்பனை", "sales"),
+        (r"விற்றோம்|விற்றது|விற்றிருக்கிறோம்", "sales"),
+        (r"பிசினஸ்|பிஸினஸ்", "business"),
+        (r"\b(?:sell|sold|selling)\b", "sales"),
+        (r"\border amount\b", "order value"),
+        (r"கலெக்ட்|கலெக்ஷன்|வசூல்|பணம் வந்த", "collected"),
+    )
+    for pattern, replacement in replacements:
+        value = re.sub(pattern, replacement, value, flags=re.I)
+    return " ".join(value.split())
 
 
 def _tokens(text: str) -> list[str]:
@@ -327,7 +362,7 @@ def parse_date(text: str) -> str | None:
         return (today + timedelta(days=2)).isoformat()
     if "tomorrow" in value or "naalai" in value or "நாளை" in value or "நாளைக்கு" in value:
         return (today + timedelta(days=1)).isoformat()
-    if "today" in value or "innaiku" in value or "innikku" in value or "indru" in value or "இன்று" in value:
+    if "today" in value or "innaiku" in value or "innikku" in value or "indru" in value or "இன்று" in value or "இன்னுக்கு" in value:
         return today.isoformat()
     if "next week" in value:
         return (today + timedelta(days=7)).isoformat()

@@ -5,6 +5,8 @@
 **/.env
 **/.env.*
 !**/.env.example
+# Production build-time values only (no secrets); required by vite.config.js.
+!frontend/.env.production
 
 # Local databases, uploaded files, invoice outputs, and backups
 backend/data/
@@ -14,12 +16,24 @@ backend/invoices/
 # Frontend build/runtime dependencies
 frontend/node_modules/
 frontend/dist/
+tests/node_modules/
 
 # Local verification runtime (database cluster, Playwright, temporary files)
 .runtime/
+
+# Vercel CLI link metadata
+.vercel/
 
 # Python artifacts
 **/__pycache__/
 **/*.py[cod]
 **/.pytest_cache/
 **/.venv/
+
+# Local machine and generated files
+.DS_Store
+*.log
+*.db
+*.sqlite
+*.sqlite3
+.vercel

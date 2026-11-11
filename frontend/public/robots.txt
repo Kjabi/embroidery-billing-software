@@ -1,0 +1,4 @@
+User-agent: *
+Disallow: /
+
+# This repository serves an authenticated admin application, not public pages.

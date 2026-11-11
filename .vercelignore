@@ -1,0 +1,39 @@
+# Files that must never be uploaded to Vercel with `vercel deploy`.
+# The CLI uses this file (not .gitignore) to decide what to upload, so secrets and
+# heavyweight local state are excluded here explicitly.
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+# Public build-time values only; required by frontend/vite.config.js.
+!frontend/.env.production
+
+# Local verification state (databases, Playwright, speech models, logs)
+.runtime/
+
+# Python virtualenv and caches
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+
+# Local data, uploads and backups
+backend/data/
+backend/backups/
+backend/invoices/
+# Tests are not needed in the serverless bundle
+backend/tests/
+
+# Frontend dependencies and previous build output
+frontend/node_modules/
+frontend/dist/
+
+# Editor and VCS metadata
+.git/
+.vscode/
+.vercel/

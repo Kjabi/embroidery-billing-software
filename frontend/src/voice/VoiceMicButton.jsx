@@ -6,6 +6,8 @@ import {
   modelDisplayName,
   modelOptions,
   SpeechSession,
+  NativeSpeechSession,
+  pcm16Wav,
   speechCapabilities,
   speechLanguage,
   SPEECH_LANGUAGES,
@@ -26,10 +28,12 @@ export default function VoiceMicButton({
   onStatus,
   onSpeechStart,
   onEnd,
+  transcribeTamilRemotely,
   language = "en",
   onLanguageChange,
   showLanguage = true,
   disabled = false,
+  suppressInput = false,
   compact = false,
   label = "Start conversation",
 }) {
@@ -50,6 +54,7 @@ export default function VoiceMicButton({
   const speechStartRef = useRef(onSpeechStart);
   const endRef = useRef(onEnd);
   const languageRef = useRef(language);
+  const pausedRef = useRef(false);
 
   useEffect(() => {
     statusRef.current = onStatus;
@@ -71,14 +76,21 @@ export default function VoiceMicButton({
     processingRef.current = true;
     while (queueRef.current.length) {
       const segment = queueRef.current.shift();
-      if (!activeRef.current) break;
+      if (!activeRef.current || pausedRef.current) break;
       const selected = speechLanguage(languageRef.current);
       report("transcribing", `Transcribing ${selected.label} locally…`);
       try {
-        const text = await transcribeLocally(segment, { language: languageRef.current });
-        if (text) await transcriptRef.current?.(text);
+        const useTamilServer = (languageRef.current === "ta" || languageRef.current === "mixed")
+          && import.meta.env.VITE_TAMIL_STT_MODE === "server";
+        const text = useTamilServer
+          ? await transcribeTamilRemotely?.(pcm16Wav(segment), languageRef.current === "mixed" ? "ta" : languageRef.current)
+          : await transcribeLocally(segment, { language: languageRef.current });
+        if (useTamilServer && !text) throw new Error("Tamil server transcription is unavailable. Type the command instead.");
+        if (text && activeRef.current && !pausedRef.current) {
+          await transcriptRef.current?.(text);
+        }
       } catch (error) {
-        if (activeRef.current) {
+        if (activeRef.current && !pausedRef.current) {
           errorRef.current?.(error?.message || "The local speech model could not transcribe that.");
         }
       }
@@ -90,6 +102,21 @@ export default function VoiceMicButton({
     }
   };
 
+  useEffect(() => {
+    const session = sessionRef.current;
+    if (!session || !activeRef.current) return;
+    if (suppressInput) {
+      pausedRef.current = true;
+      queueRef.current = [];
+      session.pause?.();
+      report("paused", "Paused while the assistant is speaking…");
+    } else if (pausedRef.current) {
+      pausedRef.current = false;
+      session.resume?.();
+      report("listening", `Listening — ${speechLanguage(languageRef.current).label}`);
+    }
+  }, [suppressInput]);
+
   const start = async () => {
     if (disabled || active) return;
     if (!capabilities.supported) {
@@ -99,13 +126,40 @@ export default function VoiceMicButton({
     errorRef.current?.("");
     setCacheNote("");
     const selected = speechLanguage(languageRef.current);
-    report("loading", `Loading the local ${selected.label} speech model…`);
-    setProgress({ percent: null, message: `Loading the local ${selected.label} speech model…` });
+    const useTamilServer = (languageRef.current === "ta" || languageRef.current === "mixed")
+      && import.meta.env.VITE_TAMIL_STT_MODE === "server";
+    const useNativeSpeech = capabilities.nativeSpeech
+      && import.meta.env.VITE_VOICE_FAST_MODE !== "false"
+      && languageRef.current === "en"
+      && !useTamilServer;
+    report(useNativeSpeech ? "loading" : "loading", useNativeSpeech
+      ? `Starting fast ${selected.label} browser speech…`
+      : `Loading the local ${selected.label} speech model…`);
+    setProgress(useNativeSpeech ? null : { percent: null, message: `Loading the local ${selected.label} speech model…` });
     try {
-      await loadLocalWhisper(event => {
-        if (aliveRef.current) setProgress(event);
-      }, languageRef.current);
-      const session = new SpeechSession({
+      if (!useTamilServer && !useNativeSpeech) {
+        await loadLocalWhisper(event => {
+          if (aliveRef.current) setProgress(event);
+        }, languageRef.current);
+      }
+      const session = useNativeSpeech
+        ? new NativeSpeechSession({
+          language: languageRef.current,
+          onTranscript: text => transcriptRef.current?.(text),
+          onError: error => errorRef.current?.(error?.message || "Fast speech recognition failed."),
+          onStateChange: state => {
+            if (state === "error") {
+              activeRef.current = false;
+              sessionRef.current = null;
+              setActive(false);
+              setLevel(0);
+              report("error", "Microphone unavailable — type instead");
+              return;
+            }
+            if (activeRef.current) report(state, state === "listening" ? `Listening — ${selected.label}` : "");
+          },
+        })
+        : new SpeechSession({
         onSegment: segment => {
           if (!activeRef.current) return;
           queueRef.current.push(segment);
@@ -127,10 +181,11 @@ export default function VoiceMicButton({
             report("hearing", "Hearing you…");
           }
         },
-      });
+        });
       sessionRef.current = session;
       await session.start();
       activeRef.current = true;
+      pausedRef.current = false;
       setActive(true);
       report("listening", `Listening — ${speechLanguage(languageRef.current).label}`);
       setProgress(null);
@@ -138,6 +193,7 @@ export default function VoiceMicButton({
       sessionRef.current?.stop?.();
       sessionRef.current = null;
       activeRef.current = false;
+      pausedRef.current = false;
       setActive(false);
       setProgress(null);
       report("error", error?.message || "Could not start the voice conversation.");
@@ -184,6 +240,11 @@ export default function VoiceMicButton({
   const statusText = (() => {
     if (!capabilities.supported && phase === "idle") return capabilities.reasons[0];
     if (phase === "loading") {
+      if (capabilities.nativeSpeech && import.meta.env.VITE_VOICE_FAST_MODE !== "false"
+        && !((language === "ta" || language === "mixed") && import.meta.env.VITE_TAMIL_STT_MODE === "server")) {
+        return `Fast browser speech recognition — ${selectedLanguage.label}`;
+      }
+      if ((language === "ta" || language === "mixed") && import.meta.env.VITE_TAMIL_STT_MODE === "server") return `Preparing self-hosted ${selectedLanguage.label} speech…`;
       if (!progress) return `Loading the local ${selectedLanguage.label} speech model…`;
       return progress.percent == null
         ? progress.message || "Loading the local speech model…"
@@ -193,6 +254,7 @@ export default function VoiceMicButton({
     if (phase === "hearing") return "Hearing you…";
     if (phase === "listening") return `Listening — ${selectedLanguage.label}`;
     if (phase === "error") return "Voice is unavailable — type instead";
+    if ((language === "ta" || language === "mixed") && import.meta.env.VITE_TAMIL_STT_MODE === "server") return "Tamil speech is processed by the authenticated self-hosted backend.";
     return cacheNote || "Voice runs only in this browser.";
   })();
 

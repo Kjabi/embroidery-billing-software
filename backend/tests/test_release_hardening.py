@@ -328,6 +328,18 @@ def test_finance_exports_are_valid_and_csv_formula_safe(tmp_path: Path) -> None:
         assert pdf_response.content.startswith(b"%PDF")
 
 
+def test_backup_returns_clear_503_on_serverless_without_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with make_client(tmp_path) as client:
+        headers = login(client)
+        import main
+
+        monkeypatch.setattr(main, "IS_SERVERLESS_DEPLOYMENT", True)
+        response = client.post("/api/backup", headers=headers)
+        assert response.status_code == 503
+        assert "serverless" in response.json()["detail"].lower()
+        assert not (tmp_path / "backups").exists() or not list((tmp_path / "backups").glob("backup_*.db"))
+
+
 def test_restore_rejects_invalid_and_incomplete_backups(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         headers = login(client)
@@ -607,3 +619,41 @@ def test_customer_update_requires_authentication(tmp_path: Path) -> None:
         assert client.put(f"/api/customers/{customer['id']}", json={"name": "Hacked"}).status_code == 401
         unchanged = page_items(client.get("/api/customers", headers=headers, params={"q": "Auth Target"}))[0]
         assert unchanged["name"] == "Auth Target"
+
+
+def test_reference_image_limit_fits_vercel_request_body_cap() -> None:
+    """Vercel Functions reject request bodies above 4.5 MB before the app sees them.
+
+    Keeping the application limit below that cap ensures users get the friendly
+    413 message from the API instead of a platform-level FUNCTION_PAYLOAD_TOO_LARGE.
+    """
+    import main
+
+    assert main.MAX_REFERENCE_IMAGE_BYTES <= int(4.5 * 1024 * 1024)
+
+
+def test_dashboard_today_sales_and_collection_match_the_ledger(tmp_path: Path) -> None:
+    """The mobile dashboard's "today" cards must come from real order/payment rows."""
+    import main
+
+    with make_client(tmp_path) as client:
+        headers = login(client)
+        today = main.business_today().isoformat()
+        created = client.post(
+            "/api/orders",
+            headers=headers,
+            json=order_payload(
+                client,
+                headers,
+                order_date=today,
+                paid_amount=300,
+                total_amount=800,
+            ),
+        )
+        assert created.status_code == 200, created.text
+
+        summary = client.get("/api/dashboard/summary", headers=headers)
+        assert summary.status_code == 200, summary.text
+        data = summary.json()["summary"]
+        assert data["today_sales"] == 800
+        assert data["today_collection"] == 300

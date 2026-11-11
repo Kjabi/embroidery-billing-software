@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --port 5173",
     "build": "vite build",
-    "test": "node --test src/voice/*.test.js"
+    "test": "node --test src/voice/*.test.js src/mobile/*.test.js"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.2",

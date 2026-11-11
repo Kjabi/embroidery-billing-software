@@ -2,9 +2,14 @@
 
 Updated: 2026-10-31 (Asia/Kolkata)
 
-Target: Cloudflare Pages Free for the React frontend, Oracle Cloud Always Free
-Ampere A1 for the existing FastAPI backend, existing Supabase Free for
+Target: Oracle Cloud Always Free Ampere A1 serving **both** the React SPA (via
+Caddy) and the existing FastAPI backend, plus existing Supabase Free for
 PostgreSQL and private Storage. No paid resource, API, or plan is required.
+
+Cloudflare Pages is **not used**: the production build contains a 25.61 MiB
+ONNX Runtime WASM file, above the Pages 25 MiB per-file limit. Self-hosting the
+SPA on the same Caddy origin removes that limit and avoids cross-origin CORS.
+See `CLOUDFLARE_DEPLOYMENT_COMPATIBILITY.md`.
 
 **Deployment status: not executed.** There is no Cloudflare API token, Oracle
 tenancy, SSH key, or Supabase production credential in this environment. This
@@ -14,15 +19,16 @@ possible; the external provisioning steps remain blocked.
 ## 1. Component map
 
 ```text
-Browser (Cloudflare Pages, pages.dev)
-  └─ VITE_API_BASE_URL = https://<backend-domain>/api
-       └─ Caddy (TLS) → FastAPI container (single worker) on Oracle A1
-            ├─ psycopg → Supabase session pooler (TLS)
-            └─ HTTPS → Supabase Storage (private buckets)
+Browser
+  └─ https://<app-domain>/            → Caddy static SPA (/srv/app)
+  └─ https://<app-domain>/api/*       → Caddy → FastAPI (single worker) on Oracle A1
+                                            ├─ psycopg → Supabase session pooler (TLS)
+                                            └─ HTTPS → Supabase Storage (private buckets)
 
-Browser speech recognition and TTS run locally in the browser. No audio is
-sent to the Oracle host. Model weights come from public Hugging Face repos and
-are cached in the browser.
+One origin, one TLS certificate, no CORS. VITE_API_BASE_URL is the relative
+path `/api`. The voice assistant is disabled in the production build
+(VITE_VOICE_ENABLED=false); the lazy voice/WASM assets stay on disk but are
+never fetched while the panel is hidden.
 ```
 
 ## 2. Oracle Cloud Always Free — verified limits and risks
@@ -75,8 +81,9 @@ production image (see `deploy/Dockerfile`); it is optional and only used by the
 API transcription endpoint, not by the browser assistant.
 
 Not verified: an actual ARM64 boot, Docker build, or Oracle run. This machine is
-macOS x86_64 and the Docker daemon is not running, so only wheel availability
-and the PostgreSQL migration were tested locally.
+macOS **arm64** and the Docker daemon is not running, so only wheel availability
+and the PostgreSQL migration were tested locally. See
+`ARM64_COMPATIBILITY_REPORT.md` for the current wheel-resolution evidence.
 
 ## 4. Server provisioning (manual, requires an Oracle account)
 
@@ -121,10 +128,10 @@ Two zero-cost options:
   public IP. This is free but depends on that provider's availability and terms.
 
 A bare IP address cannot get a normal Let's Encrypt certificate. Do not run the
-API over plain HTTP: the Pages frontend is HTTPS and browsers block mixed
-content. Cloudflare Tunnel is another free TLS option, but a stable named tunnel
-needs a domain; the quick `trycloudflare.com` tunnels are not suitable for
-production.
+SPA or API over plain HTTP: both share one HTTPS origin, and browsers block
+mixed content. Cloudflare Tunnel is another free TLS option, but a stable named
+tunnel needs a domain; the quick `trycloudflare.com` tunnels are not suitable
+for production.
 
 ## 6. Deploy the backend on the server
 
@@ -135,20 +142,29 @@ cp deploy/backend.env.example deploy/backend.env
 chmod 600 deploy/backend.env
 # edit deploy/backend.env with the real Supabase and admin values
 
-# Caddy needs the DNS name:
+# Caddy needs the DNS name (it is also the app origin):
 printf 'BACKEND_DOMAIN=%s\n' 'your-name.duckdns.org' > deploy/systemd.env
 chmod 600 deploy/systemd.env
+
+# Build the SPA first. Caddy mounts ../frontend/dist read-only at /srv/app.
+# Voice is disabled for this deployment (see the go-live decision).
+cd frontend
+npm ci
+VITE_API_BASE_URL=/api VITE_VOICE_ENABLED=false npm run build
+cd ..
 
 # Build and start. The first build compiles nothing native on ARM64.
 docker compose -f deploy/docker-compose.yml up -d --build
 docker compose -f deploy/docker-compose.yml ps
-curl -fsS https://your-name.duckdns.org/openapi.json >/dev/null && echo API OK
+curl -fsS https://your-name.duckdns.org/api/health && echo ' API OK'
 ```
 
-The backend container binds only to `127.0.0.1:8000`; Caddy exposes 80/443 and
-terminates TLS. The app runs one uvicorn worker on purpose: conversation state,
-login throttling, and rate limits are process-local. Do not add workers without
-moving that state to a shared store.
+The backend container binds only to `127.0.0.1:8000`; Caddy exposes 80/443,
+terminates TLS, serves the SPA from `/srv/app`, and proxies `/api/*` to the
+backend. Because the SPA and API share one origin, no CORS is involved. The app
+runs one uvicorn worker on purpose: conversation state, login throttling, and
+rate limits are process-local. Do not add workers without moving that state to
+a shared store.
 
 Process management: install `deploy/embroidery-backend.service` as
 `/etc/systemd/system/embroidery-backend.service`, adjust `WorkingDirectory`,
@@ -168,7 +184,7 @@ Secrets:
   deploy user, and never committed.
 - `APP_SECRET_KEY` must be random, e.g. `openssl rand -hex 32`.
 - The Supabase **service-role** key stays server-side. It must never be a
-  `VITE_` variable, React source, Pages asset, or browser storage value.
+  `VITE_` variable, React source, static asset, or browser storage value.
 - Remove `ADMIN_INITIAL_PASSWORD` after the first successful initialization.
 - Rotate the service-role key and admin password if a server image or env file
   is ever exposed.
@@ -224,43 +240,52 @@ existing `INV-2026-005` row, then the real migration file:
 - Production Supabase was not modified; migration `0003` is still unapplied
   there.
 
-## 9. Deploy the frontend to Cloudflare Pages
+## 9. Deploy the frontend on the same host (Caddy)
+
+Owner decision: the SPA is served by the same Caddy instance as the API, not by
+Cloudflare Pages. This is what removes the 25 MiB Pages per-file failure.
 
 ```bash
-cd frontend
+cd /opt/embroidery/frontend
 npm ci
-VITE_API_BASE_URL=https://your-name.duckdns.org/api \
-VITE_VOICE_ENABLED=true \
-npm run build
-
-# Requires `wrangler login` or CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID.
-npx wrangler pages deploy dist --project-name=lalithas-apparel
+VITE_API_BASE_URL=/api VITE_VOICE_ENABLED=false npm run build
+cd ..
+# dist is now at /opt/embroidery/frontend/dist and is bind-mounted read-only
+# into Caddy at /srv/app by deploy/docker-compose.yml.
+docker compose -f deploy/docker-compose.yml up -d
+curl -fsS https://your-name.duckdns.org/ | head -c 200
 ```
 
 Notes:
 
-- Use the free `*.pages.dev` domain unless the client already has a domain.
-- Set the same `VITE_API_BASE_URL` in the Pages project build settings. These
-  `VITE_` values are public build inputs; never put secrets there.
-- Add the exact Pages origin, e.g. `https://lalithas-apparel.pages.dev`, to the
-  backend `FRONTEND_ORIGIN` allowlist (comma-separated). Do not use `*`.
-- Model weights are not bundled; they are fetched from Hugging Face and cached
-  by the browser. Keep them out of `frontend/dist`.
-- Pages Free has soft limits (builds/month, bandwidth, file size). A 26.9 MB
-  ONNX Runtime WASM asset and a ~1.3 MB app bundle are well within per-file
-  limits, but repeated large model downloads consume the user's bandwidth, not
-  Pages bandwidth, because they come from Hugging Face.
-- Deployment requires a Cloudflare account/token. **It was not performed here.**
+- `VITE_API_BASE_URL=/api` is a **relative** path because the SPA and API share
+  one origin. Do not use an absolute URL unless you intentionally split origins.
+- `VITE_VOICE_ENABLED=false` hides the voice assistant in production. The build
+  still emits lazy voice/WASM chunks, but they are never fetched while the panel
+  is hidden. Re-enable only after physical microphone acceptance passes.
+- `FRONTEND_ORIGIN` should be `https://your-name.duckdns.org` (the same origin).
+  CORS is not exercised for same-origin requests, but keep the allow-list exact.
+- `VITE_` values are public build inputs; never put secrets there.
+- The SPA uses `try_files {path} /index.html`, so client-side routes work.
+- Rebuilds replace `frontend/dist`; keep the previous `dist` archived for rollback
+  (see `ROLLBACK_PLAN.md`). Caddy serves files directly, so no cache purge is
+  needed, but browsers may cache a hashed bundle; hashed filenames handle this.
+- Caddy's `handle /api/*` rule proxies only the API path. `/docs` and
+  `/openapi.json` are intentionally not exposed through the SPA origin.
+- **Cloudflare Pages is not used.** Its 25 MiB per-file limit rejects the
+  26,861,777-byte (25.61 MiB) ONNX Runtime WASM asset. The evidence and the
+  rejected alternatives are in `CLOUDFLARE_DEPLOYMENT_COMPATIBILITY.md`.
+- Deployment was **not performed here**; no Oracle host or DNS name exists yet.
 
 ## 10. Cost and free-tier limits
 
 | Item | Expected cost | Limit / risk |
 | --- | --- | --- |
-| Cloudflare Pages Free | ₹0 | Build/bandwidth quotas; `pages.dev` domain; no paid add-ons |
-| Oracle A1 Always Free | ₹0 | 2 OCPU/12 GB total, capacity shortages, idle reclamation, no SLA |
+| Oracle A1 Always Free (SPA + API) | ₹0 | 2 OCPU/12 GB total, capacity shortages, idle reclamation, no SLA |
 | Supabase Free | ₹0 | 500 MB DB, 1 GB Storage, 5 GB egress, pause after ~7 days idle, 2 projects |
 | Let's Encrypt via Caddy | ₹0 | Rate limits; needs a DNS name you control |
-| Hugging Face model downloads | ₹0 | Public weights; large first download, browser cache only |
+| Cloudflare Pages | **not used** | 25 MiB per-file limit rejects the WASM asset |
+| Hugging Face model downloads | **not used in production** | voice disabled (`VITE_VOICE_ENABLED=false`) |
 | Paid APIs / Vercel Hobby | **not used** | Vercel Hobby is non-commercial-only; a paid plan would be required |
 
 Any provider can change free-tier terms. Monitor billing and quotas, and never
@@ -268,14 +293,16 @@ add a paid fallback automatically.
 
 ## 11. Remaining blockers before production
 
-1. Real microphone end-to-end testing on the target browser/hardware (the
-   automated browser denies microphone permission).
-2. Tamil TTS playback: `speechSynthesis` with the installed `Vani` voice did not
-   produce audible speech in the test browser (see final report). A verified
-   local Tamil TTS model is not integrated.
-3. Apply migration `0003` to a verified backup of the production database and
+1. Apply migration `0003` to a verified backup of the production database and
    obtain explicit owner approval.
-4. Provision Oracle/Cloudflare/Supabase credentials and actually deploy, then
-   verify CORS, login, TLS, order/payment/invoice flows on the deployed host.
+2. Provision Oracle/Supabase credentials and actually deploy, then verify
+   TLS, same-origin login, order/payment/invoice flows and the health route.
+3. Build and run the ARM64 image on the target host (Docker daemon was
+   unavailable; see `ARM64_COMPATIBILITY_REPORT.md`).
+4. Establish an independent, restored backup destination
+   (`BACKUP_RUNBOOK.md`).
 5. Confirm Supabase Free is acceptable for a production shop despite the
    inactivity pause and no SLA.
+6. Voice is **deferred**, not verified: physical microphone acceptance and Tamil
+   TTS remain `NOT TESTED`. Keep `VITE_VOICE_ENABLED=false` until
+   `VOICE_ACCEPTANCE_REPORT.md` §7 passes.

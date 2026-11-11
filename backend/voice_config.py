@@ -88,6 +88,22 @@ def stt_provider() -> str:
     return os.getenv("VOICE_STT_PROVIDER", "local").strip().lower() or "local"
 
 
+def whispercpp_binary() -> str:
+    return os.getenv("VOICE_WHISPERCPP_BINARY", "whisper-cli").strip() or "whisper-cli"
+
+
+def whispercpp_model() -> str:
+    return os.getenv("VOICE_WHISPERCPP_MODEL", "").strip()
+
+
+def whispercpp_threads() -> int:
+    return _int("VOICE_WHISPERCPP_THREADS", 2, 1, 8)
+
+
+def stt_timeout_seconds() -> float:
+    return _float("VOICE_STT_TIMEOUT_SECONDS", 45.0, 5.0, 180.0)
+
+
 def stt_language() -> str | None:
     value = os.getenv("VOICE_STT_LANGUAGE", "").strip()
     return value or None

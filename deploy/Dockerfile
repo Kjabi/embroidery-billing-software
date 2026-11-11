@@ -34,10 +34,11 @@ USER appuser
 
 EXPOSE 8000
 
-# The app has no unauthenticated health route, so use the generated OpenAPI
-# document: it proves both the ASGI app and the process are serving.
+# GET /api/health is a public, cheap readiness route (runs SELECT 1). Use it
+# instead of /openapi.json so the check does not depend on docs being enabled.
+# It fails until the database is reachable, which is the intended readiness gate.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=4)" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)" || exit 1
 
 # One worker is deliberate: conversation state and login throttling are
 # process-local. Use an external queue/session store before scaling out.

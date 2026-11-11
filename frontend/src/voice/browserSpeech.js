@@ -66,6 +66,7 @@ export function speechCapabilities() {
     supported: reasons.length === 0,
     reasons,
     webgpu: Boolean(navigator.gpu),
+    nativeSpeech: Boolean(window.SpeechRecognition || window.webkitSpeechRecognition),
     memory,
     model: DEFAULT_MODEL,
   };
@@ -100,6 +101,30 @@ export function resampleTo16k(samples, sampleRate, targetRate = TARGET_SAMPLE_RA
     output[index] = samples[before] * (1 - weight) + samples[after] * weight;
   }
   return output;
+}
+
+/** Create a standards-compliant mono 16-bit PCM WAV without persisting audio. */
+export function pcm16Wav(samples, sampleRate = TARGET_SAMPLE_RATE) {
+  const input = samples instanceof Float32Array ? samples : Float32Array.from(samples || []);
+  const buffer = new ArrayBuffer(44 + input.length * 2);
+  const view = new DataView(buffer);
+  const write = (offset, value) => view.setUint8(offset, value.charCodeAt(0));
+  ["RIFF", "WAVE", "fmt ", "data"].forEach((chunk, index) => {
+    for (let position = 0; position < chunk.length; position += 1) write([0, 8, 12, 36][index] + position, chunk[position]);
+  });
+  view.setUint32(4, 36 + input.length * 2, true);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  for (let index = 0; index < input.length; index += 1) {
+    const value = Math.max(-1, Math.min(1, input[index]));
+    view.setInt16(44 + index * 2, value < 0 ? value * 0x8000 : value * 0x7fff, true);
+  }
+  return new Blob([buffer], { type: "audio/wav" });
 }
 
 export function modelDisplayName(model) {
@@ -171,7 +196,7 @@ export async function loadLocalWhisper(onProgress, language = "en") {
     }
     const created = await pipeline("automatic-speech-recognition", model, {
       dtype,
-      device: "wasm",
+      device: navigator.gpu ? "webgpu" : "wasm",
       progress_callback: progressTracker(onProgress),
     });
     loadedPipeline = created;
@@ -191,8 +216,8 @@ export async function transcribeLocally(samples, { language = "en", onProgress }
   const options = {
     task: "transcribe",
     language: selected.code,
-    chunk_length_s: 30,
-    stride_length_s: 5,
+    chunk_length_s: 10,
+    stride_length_s: 2,
     return_timestamps: false,
   };
   const result = await transcriber(samples, options);
@@ -219,8 +244,8 @@ export class SpeechSession {
     onSpeechStart,
     onError,
     onStateChange,
-    silenceMs = 900,
-    maxSegmentMs = 20000,
+    silenceMs = 550,
+    maxSegmentMs = 12000,
   } = {}) {
     this.onSegment = onSegment;
     this.onLevel = onLevel;
@@ -235,6 +260,7 @@ export class SpeechSession {
     this.processor = null;
     this.mute = null;
     this.running = false;
+    this.paused = false;
     this.inSpeech = false;
     this.chunks = [];
     this.preRoll = [];
@@ -264,7 +290,7 @@ export class SpeechSession {
     await this.context.resume?.();
     this.sampleRate = this.context.sampleRate || 48000;
     this.source = this.context.createMediaStreamSource(this.stream);
-    this.processor = this.context.createScriptProcessor(2048, 1, 1);
+    this.processor = this.context.createScriptProcessor(1024, 1, 1);
     this.mute = this.context.createGain();
     this.mute.gain.value = 0;
     this.processor.onaudioprocess = event => {
@@ -325,7 +351,7 @@ export class SpeechSession {
     }
   }
 
-  trimPreRoll() {
+    trimPreRoll() {
     const maxSamples = Math.round(this.sampleRate * 0.35);
     let total = this.preRoll.reduce((sum, item) => sum + item.length, 0);
     while (this.preRoll.length && total > maxSamples) {
@@ -380,5 +406,116 @@ export class SpeechSession {
     this.mute = null;
     this.context = null;
     this.onStateChange?.("idle");
+  }
+
+  pause() {
+    if (!this.running) return;
+    this.paused = true;
+    this.running = false;
+    this.inSpeech = false;
+    this.chunks = [];
+    this.preRoll = [];
+    this.onStateChange?.("paused");
+  }
+
+  resume() {
+    if (!this.paused || !this.stream) return;
+    this.paused = false;
+    this.running = true;
+    this.onStateChange?.("listening");
+  }
+}
+
+/**
+ * Use the browser's streaming recognizer when available. It returns speech
+ * quickly and avoids loading a large local model. Other browsers use Whisper.
+ */
+export class NativeSpeechSession {
+  constructor({ language = "en", onTranscript, onError, onStateChange } = {}) {
+    this.language = language;
+    this.onTranscript = onTranscript;
+    this.onError = onError;
+    this.onStateChange = onStateChange;
+    this.running = false;
+    this.paused = false;
+    this.recognition = null;
+  }
+
+  async start() {
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) throw new Error("Fast browser speech recognition is unavailable.");
+    this.recognition = new Recognition();
+    this.recognition.lang = speechLanguage(this.language).code === "ta" ? "ta-IN" : "en-IN";
+    this.recognition.continuous = true;
+    this.recognition.interimResults = false;
+    this.recognition.maxAlternatives = 1;
+    this.recognition.onstart = () => this.onStateChange?.("listening");
+    this.recognition.onresult = event => {
+      if (!this.running || this.paused) return;
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        if (result.isFinal && result[0]?.transcript) this.onTranscript?.(result[0].transcript.trim());
+      }
+    };
+    this.recognition.onerror = event => {
+      if (event.error === "no-speech" || event.error === "aborted") return;
+      const fatal = event.error === "not-allowed"
+        || event.error === "service-not-allowed"
+        || event.error === "audio-capture"
+        || event.error === "network";
+      if (fatal) {
+        // A denied or unavailable microphone cannot be retried by restarting
+        // recognition: Chrome would loop on the same error and leave the panel
+        // stuck in "listening". End the session instead.
+        this.running = false;
+        this.onStateChange?.("error");
+        const message = event.error === "audio-capture"
+          ? "No microphone was found. Type the command instead."
+          : event.error === "network"
+            ? "Browser speech recognition is unavailable. Type the command instead."
+            : "Microphone permission was denied. Type the command instead.";
+        this.onError?.(new Error(message));
+        try { this.recognition.abort?.(); } catch { /* already stopped */ }
+        return;
+      }
+      this.onError?.(new Error(`Browser speech recognition failed: ${event.error}`));
+    };
+    this.recognition.onend = () => {
+      if (this.running && !this.paused) {
+        try { this.recognition.start(); } catch { /* browser is already restarting */ }
+      } else {
+        this.onStateChange?.("idle");
+      }
+    };
+    this.running = true;
+    this.recognition.start();
+  }
+
+  stop() {
+    this.running = false;
+    this.paused = false;
+    this.recognition?.stop?.();
+    this.recognition = null;
+    this.onStateChange?.("idle");
+  }
+
+  pause() {
+    if (!this.running) return;
+    this.paused = true;
+    this.running = false;
+    this.recognition?.stop?.();
+    this.onStateChange?.("paused");
+  }
+
+  resume() {
+    if (!this.paused || !this.recognition) return;
+    this.paused = false;
+    this.running = true;
+    try {
+      this.recognition.start();
+    } catch {
+      // The browser may still be completing the previous stop event.
+    }
+    this.onStateChange?.("listening");
   }
 }

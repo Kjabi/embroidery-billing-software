@@ -3,6 +3,7 @@ import {
   AlertCircle,
   AlertTriangle,
   Eraser,
+  X,
   Send,
   ShieldCheck,
   Volume2,
@@ -27,7 +28,7 @@ const PROVIDER_LABELS = {
   ollama: "Ollama (local)",
 };
 
-export default function VoiceAssistantPanel({ apiFetch, apiBase, onOpenInvoice, onDataChanged }) {
+export default function VoiceAssistantPanel({ apiFetch, apiBase, onOpenInvoice, onDataChanged, onClose, variant = "desktop" }) {
   const [messages, setMessages] = useState([]);
   const [task, setTask] = useState(null);
   const [pending, setPending] = useState(null);
@@ -81,7 +82,13 @@ export default function VoiceAssistantPanel({ apiFetch, apiBase, onOpenInvoice, 
     if (!speakRef.current || !value || !("speechSynthesis" in window)) return;
     const utterance = new SpeechSynthesisUtterance(String(value));
     utterance.lang = speechLanguage(value);
-    utterance.rate = 0.98;
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+    const preferredVoice = window.speechSynthesis.getVoices()
+      .find(voice => voice.lang?.toLowerCase().startsWith(utterance.lang.slice(0, 2).toLowerCase()))
+      || window.speechSynthesis.getVoices().find(voice => /english|tamil|india/i.test(voice.name));
+    if (preferredVoice) utterance.voice = preferredVoice;
     utterance.onend = () => setSpeaking(false);
     utterance.onerror = () => setSpeaking(false);
     window.speechSynthesis.cancel();
@@ -162,6 +169,15 @@ export default function VoiceAssistantPanel({ apiFetch, apiBase, onOpenInvoice, 
     } finally {
       if (aliveRef.current) setBusy(false);
     }
+  };
+
+  const transcribeTamilRemotely = async (audioBlob, language) => {
+    const form = new FormData();
+    form.append("audio", audioBlob, "tamil-utterance.wav");
+    const result = await request(`/voice/transcribe?language=${encodeURIComponent(language)}`, {
+      method: "POST", body: form,
+    });
+    return result.transcript;
   };
 
   const confirmFromDialog = async (phrase) => {
@@ -257,19 +273,32 @@ export default function VoiceAssistantPanel({ apiFetch, apiBase, onOpenInvoice, 
   const providerLabel = PROVIDER_LABELS[provider] || provider;
 
   return (
-    <section className="mb-6 rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 text-slate-900 shadow-sm">
+    <section className={variant === "mobile"
+      ? "mobile-voice-panel fixed z-50 flex flex-col overflow-hidden border border-indigo-100 bg-indigo-50/95 p-4 text-slate-900 shadow-2xl backdrop-blur"
+      : "fixed bottom-24 right-6 z-40 flex max-h-[68vh] w-[min(360px,calc(100vw-32px))] flex-col overflow-hidden rounded-2xl border border-indigo-100 bg-indigo-50/95 p-4 text-slate-900 shadow-2xl backdrop-blur"}>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <h2 className="flex items-center gap-2 font-semibold">
             <ShieldCheck size={18} className="text-indigo-600" />
-            Voice assistant
+            <span className="truncate">Lalitha AI Assistant</span>
           </h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            Ask about live orders and payments, or prepare a change. Writes are saved only after a preview and an
-            explicit confirmation.
+            Ask about orders, customers and payments.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            {voiceStatus.phase === "idle" ? "Ready" : voiceStatus.phase}
+          </span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-slate-500 hover:bg-white hover:text-slate-800"
+            aria-label="Close Lalitha AI Assistant"
+          >
+            <X size={17} />
+          </button>
           <button
             type="button"
             onClick={() => setSpeak(current => !current)}
@@ -290,9 +319,11 @@ export default function VoiceAssistantPanel({ apiFetch, apiBase, onOpenInvoice, 
           </button>
           <VoiceMicButton
             disabled={busy}
+            suppressInput={speaking || busy}
             language={voiceLanguage}
             onLanguageChange={changeVoiceLanguage}
             onTranscript={transcript => submitTurn(transcript)}
+            transcribeTamilRemotely={transcribeTamilRemotely}
             onError={message => setError(message)}
             onStatus={(phase, detail) => setVoiceStatus({ phase, detail })}
             onSpeechStart={stopSpeaking}
@@ -332,6 +363,7 @@ export default function VoiceAssistantPanel({ apiFetch, apiBase, onOpenInvoice, 
         </ul>
       )}
 
+      <div className="min-h-0 overflow-y-auto">
       <VoiceTranscript messages={messages} busy={busy} />
 
       <VoiceTaskCard
@@ -424,6 +456,7 @@ export default function VoiceAssistantPanel({ apiFetch, apiBase, onOpenInvoice, 
           <Send size={17} />
         </button>
       </form>
+      </div>
 
       <VoiceConfirmationDialog
         pending={dialogOpen ? pending : null}

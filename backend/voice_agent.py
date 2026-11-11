@@ -25,8 +25,10 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import voice_config
+import hybrid_ai
 import voice_parsing
 import voice_tools
+from business_time import business_today, period_bounds
 from voice_state import PendingOperation, VoiceConversation
 from voice_tools import VoiceOperationError
 
@@ -204,7 +206,7 @@ def _format_orders(orders: list[dict[str, Any]], limit: int = 12) -> str:
     return "; ".join(lines) + "." + suffix
 
 
-def format_read_result(tool: str, result: dict[str, Any]) -> str:
+def format_read_result(tool: str, result: dict[str, Any], language: str = "en") -> str:
     if result.get("ok") is False:
         return str(result.get("error") or "That information is not available.")
     if tool == "get_business_summary":
@@ -221,6 +223,13 @@ def format_read_result(tool: str, result: dict[str, Any]) -> str:
         )
     if tool == "get_sales_summary":
         label = _period_label(result.get("start_date"), result.get("end_date"), result.get("period", ""))
+        if language == "ta":
+            return (
+                f"{label} அன்று உருவாக்கப்பட்ட {result.get('orders', 0)} ஆர்டர்களின் "
+                f"மொத்த விற்பனை {_money(result.get('order_value'))}. "
+                f"பெறப்பட்ட தொகை {_money(result.get('collected'))}. "
+                "விற்பனைத் தொகையும் பெறப்பட்ட தொகையும் வேறுபட்டவை."
+            )
         return (
             f"{label}: order value {_money(result.get('order_value'))} across "
             f"{result.get('orders', 0)} orders; average order value "
@@ -318,7 +327,7 @@ _PERIOD_WORDS = (
     ("yesterday", ("yesterday", "நேற்று", "netru")),
     ("tomorrow", ("tomorrow", "நாளை", "naalai", "nalaikku")),
     ("all", ("all time", "overall", "everything", "எல்லா", "ellame")),
-    ("today", ("today", "இன்று", "innaiku", "innaikku", "innikku", "indru")),
+    ("today", ("today", "இன்று", "இன்னுக்கு", "innaiku", "innaikku", "innikku", "indru")),
 )
 
 
@@ -462,29 +471,355 @@ def _parse_new_order(text: str) -> Optional[dict[str, Any]]:
     return None
 
 
-def _parse_customer_creation(text: str) -> Optional[dict[str, str]]:
-    match = re.search(
-        r"(?:create|add|new|register)\s+(?:a\s+)?(?:new\s+)?customer\s+"
-        r"(?:named\s+|name\s+|for\s+)?(.+?)"
-        r"(?=\s+(?:phone|number|mobile|contact|address|city|notes?)\b|$)",
-        text,
-        re.I,
+def _is_bare_order_creation_request(text: str) -> bool:
+    value = voice_parsing.normalize(text)
+    return bool(
+        re.match(
+            r"^(?:(?:can|could|may)\s+we\s+)?(?:add|create|make|start|prepare|new)\s+"
+            r"(?:(?:a|an)\s+)?(?:new\s+)?order\b",
+            value,
+            re.I,
+        )
+        or re.match(
+            r"^(?:i\s+want\s+to|i'd\s+like\s+to|please)\s+"
+            r"(?:add|create|make|start|prepare)\s+(?:(?:a|an)\s+)?(?:new\s+)?order\b",
+            value,
+            re.I,
+        )
+        or re.search(r"\b(?:புதிய|புது)\s*(?:ஆர்டர்|order)\b", value, re.I)
+        or re.search(r"\b(?:ஆர்டர்|order)\s*(?:சேர்க்க|உருவாக்க)\b", value, re.I)
+        or re.search(r"\b(?:pudhu|puthu|new)\s+orders?\b", value, re.I)
+        or re.search(r"\borders?\s+(?:add|create|pannu|pannanum|podu)\b", value, re.I)
     )
-    if not match:
-        return None
-    name = _clean_query(match.group(1))
+
+
+_CUSTOMER_FIELD_LABELS: dict[str, str] = {
+    "name": r"(?:name|named|customer|பெயர்|பேரு|peyar|peru|pair)",
+    "phone": r"(?:phone|mobile|number|contact|போன்|கைபேசி|தொலைபேசி|எண்|phon)",
+    "alternate_phone": r"(?:alternate\s+phone|second\s+phone|another\s+phone|மாற்று\s+எண்)",
+    "address": r"(?:address|முகவரி|mugavari)",
+    "city": r"(?:city|town|நகரம்|ஊர்|oor|ur)",
+    "notes": r"(?:notes?|குறிப்பு|kurippu)",
+}
+# Longest first so "alternate phone" wins over "phone".
+_CUSTOMER_LABELS = "(?:" + "|".join(
+    sorted(_CUSTOMER_FIELD_LABELS.values(), key=len, reverse=True)
+) + ")"
+
+_CUSTOMER_QUESTIONS = {
+    "name": "What is the new customer's name? (வாடிக்கையாளரின் பெயர் என்ன?)",
+    "phone": "What is the customer's phone number? (வாடிக்கையாளரின் தொலைபேசி எண் என்ன?)",
+    "alternate_phone": "Is there an alternate phone number? (மாற்று எண் இருந்தால் சொல்லுங்கள்.)",
+    "address": "What is the customer's address? (முகவரி என்ன?)",
+    "city": "Which city? (எந்த ஊர்?)",
+    "notes": "Any notes for this customer? (குறிப்பு ஏதாவது?)",
+}
+
+
+def _customer_required_fields() -> list[str]:
+    """Use the live CustomerCreate contract instead of guessing mandatory fields."""
+    try:
+        return voice_tools.customer_required_fields()
+    except Exception:  # pragma: no cover - defensive only
+        return ["name", "phone"]
+
+
+def _is_customer_creation_request(text: str) -> bool:
+    """Recognise English, Tamil, and Tanglish customer-creation requests.
+
+    This is deliberately stricter than a bare mention of "customer": a read
+    question such as "show customer Priya" must never start a write workflow.
+    """
+    value = voice_parsing.normalize(text)
+    customer = r"(?:customers?|clients?|வாடிக்கையாளர்|வாடிக்கையாளரை|கஸ்டமர்|vadi\s*kayaalar|vadikkaiyalar|kastamar|kashtamar)"
+    create_verb = r"(?:add|create|register|save|make|start|open)"
+    new_word = r"(?:new|another|pudhu|puthu|pudhiya|pudhiyadhu)"
+    action_word = (
+        r"(?:add|create|register|save|make|need|want|pannu|pannanum|podu|serkanum|serkkanum|"
+        r"sirka|sirkka|serka|serkka|sollu|vendung|venum)"
+    )
+    if re.fullmatch(
+        rf"(?:a\s+)?{new_word}\s+(?:customer|client)", value, re.I
+    ):
+        return True
+    if re.fullmatch(r"(?:புதிய|புது|புதியது)\s*(?:வாடிக்கையாளர்|கஸ்டமர்|customer)", value, re.I):
+        return True
+    # English / Tanglish word order: "can we add a new customer".
+    if re.search(
+        rf"\b{create_verb}\b(?:\s+(?:a|an|one|new|another|the))*\s+{customer}\b",
+        value,
+        re.I,
+    ):
+        return True
+    # "I want to add a customer", "please create a customer", "need new customer".
+    if re.search(rf"\b{new_word}\s+{customer}\b", value, re.I) and re.search(
+        rf"\b{action_word}\b", value, re.I
+    ):
+        return True
+    # Tanglish: "customer add pannu", "oru customer create pannanum".
+    if re.search(
+        rf"\b{customer}\b.*\b{action_word}\b",
+        value,
+        re.I,
+    ):
+        return True
+    # Tamil mixed script: "புதிய customer சேர்க்க வேண்டும்",
+    # "customer சேர்க்கணும்", "வாடிக்கையாளரை உருவாக்கு".
+    if re.search(rf"(?:புதிய|புது|புதியது|{new_word})\s*", value, re.I) and re.search(
+        customer, value, re.I
+    ) and re.search(
+        r"(?:சேர்|சேர்க்க|உருவாக்க|பதிவு|add|create|register|save|வேண்டும்|வேணும்|"
+        r"pannu|pannanum|serkanum|serkkanum|sollu|sirka|sirkka|serka|serkka|vendung|venum)",
+        value,
+        re.I,
+    ):
+        return True
+    if re.search(customer, value, re.I) and re.search(
+        r"(?:சேர்க்க|சேர்க்கணும்|உருவாக்க|பதிவு\s*செய்|add\s*pannu|create\s*pannu|"
+        r"add\s*pannanum|create\s*pannanum|serkanum|serkkanum|sirka|sirkka|serka|serkka)",
+        value,
+        re.I,
+    ):
+        return True
+    return False
+
+
+def _customer_creation_details(text: str) -> dict[str, str]:
+    """Extract only explicitly supplied customer fields from one utterance."""
+    details: dict[str, str] = {}
+
     phone = voice_parsing.parse_phone(text)
+    if phone:
+        details["phone"] = phone
+
+    for field, label in _CUSTOMER_FIELD_LABELS.items():
+        if field == "phone":
+            continue
+        match = re.search(
+            rf"{label}\s*(?:is|:|-)?\s*(.+?)(?=\s*{_CUSTOMER_LABELS}\s|$)",
+            text,
+            re.I | re.S,
+        )
+        if match:
+            value = _clean_query(match.group(1))
+            if value:
+                details[field] = value
+
+    # A bare name is allowed only when no other labelled clause is present.
+    if "name" not in details and not re.search(_CUSTOMER_LABELS, text, re.I):
+        candidate = _clean_query(text)
+        if candidate and not re.fullmatch(r"[\d\s+()\-]+", candidate):
+            details["name"] = candidate
+
+    return details
+
+
+def _parse_customer_creation(text: str) -> Optional[dict[str, str]]:
+    """Return a complete inline customer draft, or ``None`` when fields are missing."""
+    if not _is_customer_creation_request(text):
+        return None
+    details = _customer_creation_details(text)
+    name = str(details.get("name") or "").strip()
+    phone = voice_parsing.parse_phone(details.get("phone") or text)
     if not name or not phone:
         return None
-    address = ""
-    address_match = re.search(r"\baddress\s+(?:is\s+|to\s+)?(.+?)(?=\s+(?:city|notes?)\b|$)", text, re.I)
-    if address_match:
-        address = _clean_query(address_match.group(1))
-    city = "Madurai"
-    city_match = re.search(r"\bcity\s+(?:is\s+|to\s+)?([A-Za-z\u0B80-\u0BFF ]{2,40})", text, re.I)
-    if city_match:
-        city = _clean_query(city_match.group(1))
-    return {"name": name, "phone": phone, "address": address, "city": city}
+    return {
+        "name": name,
+        "phone": phone,
+        "alternate_phone": details.get("alternate_phone", ""),
+        "address": details.get("address", ""),
+        "city": details.get("city", "Madurai"),
+        "notes": details.get("notes", ""),
+    }
+
+
+def _customer_field_error(field: str, value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if field == "name":
+        if len(text) < 2:
+            return "The customer name must be at least 2 characters."
+        if len(text) > 80:
+            return "The customer name is too long. Please use a shorter name."
+    elif field == "phone":
+        if not voice_parsing.parse_phone(text):
+            return "Please say a valid 10 to 15 digit phone number."
+    elif field == "alternate_phone" and text:
+        if not voice_parsing.parse_phone(text):
+            return "Please say a valid alternate phone number, or say skip."
+        if len(text) > 24:
+            return "The alternate phone number is too long."
+    elif field == "address" and len(text) > 240:
+        return "The address is too long. Please use a shorter address."
+    elif field == "city" and len(text) > 80:
+        return "The city name is too long."
+    elif field == "notes" and len(text) > 800:
+        return "The notes are too long."
+    return None
+
+
+def _customer_draft_args(conversation: VoiceConversation) -> dict[str, str]:
+    draft = conversation.draft
+    return {
+        "name": draft.get("name", ""),
+        "phone": draft.get("phone", ""),
+        "alternate_phone": draft.get("alternate_phone", ""),
+        "address": draft.get("address", ""),
+        "city": draft.get("city", "Madurai") or "Madurai",
+        "notes": draft.get("notes", ""),
+    }
+
+
+def _customer_creation_reply(
+    db, conversation: VoiceConversation, text: str, *, start: bool = False
+) -> AgentReply:
+    if start:
+        conversation.intent = "create_customer"
+        conversation.draft = {}
+        conversation.awaiting = None
+        conversation.missing_fields = _customer_required_fields()
+        conversation.last_field = conversation.missing_fields[0] if conversation.missing_fields else None
+        return AgentReply(
+            reply="Sure. " + _CUSTOMER_QUESTIONS.get(conversation.last_field, "Please give the customer details.")
+        )
+
+    details = _customer_creation_details(text)
+
+    # If the turn is answering the last question but the user did not use a
+    # label, treat the unlabelled answer as that field.  This keeps previously
+    # collected fields intact and never asks the same question twice.
+    last_field = conversation.last_field
+    if last_field and last_field not in details:
+        if last_field == "phone":
+            phone = voice_parsing.parse_phone(text)
+            if phone:
+                details["phone"] = phone
+        else:
+            label_match = re.search(_CUSTOMER_LABELS, text, re.I)
+            prefix = text[: label_match.start()] if label_match else text
+            if last_field == "name":
+                # "Priya 9876543210" in one breath: keep the name, not the digits.
+                prefix = re.sub(r"[,\s]*[\d+()\-]{3,}.*$", "", prefix)
+            answer = _clean_query(prefix)
+            if answer:
+                details[last_field] = answer
+
+    for field, value in details.items():
+        if field not in _CUSTOMER_FIELD_LABELS:
+            continue
+        cleaned = str(value or "").strip()
+        if cleaned:
+            conversation.draft[field] = cleaned
+
+    required = _customer_required_fields()
+    previous_last = conversation.last_field
+    missing: list[str] = []
+    error: Optional[str] = None
+    for field in required:
+        value = conversation.draft.get(field)
+        if not str(value or "").strip():
+            missing.append(field)
+            if field == previous_last and str(text or "").strip():
+                error = error or _customer_field_error(field, text)
+            continue
+        problem = _customer_field_error(field, value)
+        if problem:
+            if field == "phone":
+                conversation.draft.pop("phone", None)
+            missing.append(field)
+            error = error or problem
+
+    conversation.missing_fields = missing or required
+    if missing:
+        conversation.last_field = missing[0]
+        question = _CUSTOMER_QUESTIONS.get(missing[0], f"Please give the {missing[0]}.")
+        return AgentReply(reply=(error + " " if error else "") + question)
+
+    # Validate optional fields that were supplied, but never invent them.
+    for field in ("alternate_phone", "address", "city", "notes"):
+        problem = _customer_field_error(field, conversation.draft.get(field, ""))
+        if problem:
+            conversation.draft.pop(field, None)
+            conversation.last_field = field
+            return AgentReply(reply=problem + " " + _CUSTOMER_QUESTIONS.get(field, ""))
+
+    conversation.last_field = None
+    conversation.awaiting = None
+    result = _call_prepare(
+        "prepare_customer_creation", _customer_draft_args(conversation), db, conversation
+    )
+    if (
+        result.data
+        and result.data.get("status") == "needs_clarification"
+        and result.data.get("existing_customer")
+    ):
+        conversation.awaiting = {
+            "kind": "customer_duplicate",
+            "existing_customer": result.data["existing_customer"],
+        }
+    return result
+
+
+def _customer_duplicate_reply(
+    db, conversation: VoiceConversation, text: str
+) -> Optional[AgentReply]:
+    """Resolve an exact-phone duplicate without ever creating a second record."""
+    existing = (conversation.awaiting or {}).get("existing_customer") or {}
+    value = voice_parsing.normalize(text)
+
+    use_existing = bool(
+        re.search(r"\b(?:yes|yeah|use|existing|same|that|already)\b", value, re.I)
+        or any(word in value for word in ("ஆமா", "ஆம்", "அந்த", "இருக்கு", "பயன்படுத்த"))
+    )
+    if use_existing and not re.search(r"\b(?:no|new|different)\b", value, re.I):
+        name = existing.get("name", "the existing customer")
+        phone = existing.get("phone", "")
+        conversation.clear_draft()
+        return AgentReply(
+            reply=(
+                f"Using the existing customer {name}"
+                + (f" ({phone})" if phone else "")
+                + ". No new customer was created."
+            )
+        )
+
+    change = bool(
+        re.search(r"\b(?:no|different|change|another|new\s+phone)\b", value, re.I)
+        or any(word in value for word in ("இல்ல", "வேற", "வேறொரு"))
+    )
+    phone = voice_parsing.parse_phone(text)
+    if phone:
+        conversation.draft["phone"] = phone
+        conversation.awaiting = None
+        conversation.last_field = None
+        result = _call_prepare(
+            "prepare_customer_creation", _customer_draft_args(conversation), db, conversation
+        )
+        if (
+            result.data
+            and result.data.get("status") == "needs_clarification"
+            and result.data.get("existing_customer")
+        ):
+            conversation.awaiting = {
+                "kind": "customer_duplicate",
+                "existing_customer": result.data["existing_customer"],
+            }
+        return result
+
+    if change:
+        conversation.draft.pop("phone", None)
+        conversation.awaiting = None
+        conversation.last_field = "phone"
+        conversation.missing_fields = ["phone"]
+        return AgentReply(
+            reply="No problem. " + _CUSTOMER_QUESTIONS["phone"]
+        )
+
+    return AgentReply(
+        reply=(
+            "A customer with that phone number already exists. "
+            "Say ‘use existing’ to use that customer, or give a different phone number."
+        )
+    )
 
 
 def _help_text() -> str:
@@ -503,9 +838,22 @@ def _help_text() -> str:
 # ---------------------------------------------------------------------------
 # Tool calls
 # ---------------------------------------------------------------------------
-def _call_read(tool: str, args: dict[str, Any], db, conversation) -> AgentReply:
+def _call_read(
+    tool: str,
+    args: dict[str, Any],
+    db,
+    conversation,
+    *,
+    text: str = "",
+    query_plan: Optional[dict[str, Any]] = None,
+) -> AgentReply:
     result = voice_tools.execute_tool(tool, args, db, conversation)
-    return AgentReply(reply=format_read_result(tool, result), data=result)
+    if query_plan:
+        result = {**result, "query_plan": query_plan}
+    return AgentReply(
+        reply=format_read_result(tool, result, voice_parsing.detect_language(text)),
+        data=result,
+    )
 
 
 def _call_prepare(tool: str, args: dict[str, Any], db, conversation) -> AgentReply:
@@ -599,6 +947,31 @@ def _handle_clarification(db, conversation: VoiceConversation, text: str) -> Opt
         elif product_query:
             args["product_query"] = product_query
         return _call_prepare("prepare_order_creation", args, db, conversation)
+
+    if kind == "order_customer":
+        customer, candidates = voice_tools.resolve_customer(db, query_text=_clean_query(text))
+        if not customer:
+            if candidates:
+                conversation.awaiting = {
+                    "kind": "customer_choice",
+                    "purpose": "create_order",
+                    "candidates": voice_tools._customer_choices(candidates),
+                }
+                return AgentReply(
+                    reply="Which customer did you mean?"
+                    + _candidate_lines(voice_tools._customer_choices(candidates))
+                )
+            return AgentReply(
+                reply="I could not find that customer. Say the registered name or phone number, "
+                "or create the customer first."
+            )
+        conversation.awaiting = {"kind": "order_product", "customer_id": customer.id}
+        conversation.intent = "create_order"
+        conversation.draft = {}
+        return AgentReply(
+            reply=f"Which product or work type is the order for {customer.name}? "
+            "Say the configured product name."
+        )
 
     if kind == "product_choice":
         candidates = awaiting.get("candidates") or []
@@ -796,9 +1169,63 @@ def _is_active_draft_delivery_answer(conversation: VoiceConversation, value: str
 
 def _handle_read_intent(db, conversation: VoiceConversation, text: str) -> Optional[AgentReply]:
     value = voice_parsing.normalize(text)
+    intent_value = voice_parsing.business_intent_text(text)
+
+    knowledge_markers = (
+        "how should",
+        "explain",
+        "what is the difference",
+        "procedure",
+        "policy",
+        "guide",
+        "எப்படி",
+        "வித்தியாசம்",
+        "செய்முறை",
+    )
+    if any(marker in value for marker in knowledge_markers):
+        evidence = hybrid_ai.retrieve_approved_documents(text)
+        plan = hybrid_ai.validate_plan(
+            hybrid_ai.QueryPlan(
+                route=hybrid_ai.Route.RAG_ONLY,
+                intent="knowledge_search",
+                language=voice_parsing.detect_language(text),
+                confidence=0.75 if evidence else 0.35,
+                requested_operation="retrieve",
+                data_sources=["knowledge_base"],
+            )
+        )
+        if not evidence:
+            return AgentReply(
+                reply=(
+                    "I could not find this in the approved business knowledge base. "
+                    "No answer was generated from general knowledge."
+                ),
+                data={"route": plan.route.value, "query_plan": plan.model_dump()},
+            )
+        citations = ", ".join(item["source"] for item in evidence)
+        answer = " ".join(item["content"] for item in evidence[:2])
+        return AgentReply(
+            reply=f"{answer} Sources: {citations}.",
+            data={
+                "route": plan.route.value,
+                "query_plan": plan.model_dump(),
+                "evidence": evidence,
+            },
+        )
 
     if re.search(r"\b(help|what can you do|commands|how do i use)\b", value) or "உதவி" in value:
         return AgentReply(reply=_help_text())
+
+    # Pending-order questions must be resolved before the broader Tamil
+    # "நிலுவை"/"பாக்கி" (outstanding) and "ஆர்டர் எத்தனை" (order count) rules,
+    # otherwise phrases such as "நிலுவை ஆர்டர் காட்டு" and
+    # "பாக்கி ஆர்டர் எத்தனை?" fall through to the wrong read tool.
+    if re.search(r"\bpending orders?\b|\bunpaid orders?\b|\bopen orders?\b", value) or any(
+        word in value for word in ("நிலுவை ஆர்டர்", "பாக்கி ஆர்டர்", "முடிக்காத ஆர்டர்")
+    ):
+        return _call_read(
+            "list_orders", {"filter": "pending", "period": "today", "limit": 20}, db, conversation
+        )
 
     if (
         "how many customer" in value
@@ -816,6 +1243,8 @@ def _handle_read_intent(db, conversation: VoiceConversation, text: str) -> Optio
         or "எத்தனை ஆர்டர்" in value
         or "ஆர்டர் எத்தனை" in value
         or "ஆர்டர் எண்ணிக்கை" in value
+        or re.search(r"(?:எவ்வளவு|எவ்ளோ)\s+ஆர்டர்.*(?:வந்த|இருக்கு)", value)
+        or re.search(r"\b(?:evlo|evalo)\s+orders?\s+(?:vand|iruk)", value)
     ):
         return _call_read("get_order_counts", {"period": detect_period(text)}, db, conversation)
 
@@ -854,31 +1283,50 @@ def _handle_read_intent(db, conversation: VoiceConversation, text: str) -> Optio
         re.search(
             r"\b(?:money )?(?:collected|collections?|receipts?)\b"
             r"|\bpayments? (?:today|history)\b"
+            r"|\bpayments? (?:received|came in)\b"
+            r"|\bpayments?.*\b(?:vand|var)\w*\b"
             r"|\bhow much (?:money )?(?:did (?:we|i) )?(?:collect|receive|get)\b",
             value,
         )
-        or any(word in value for word in ("வசூல்", "வசூலான", "கலெக்ஷன்", "பணம் வந்த"))
+        or any(word in intent_value for word in ("collected", "வசூலான"))
     ):
         return _call_read(
             "get_payment_history", {"period": detect_period(text)}, db, conversation
         )
 
-    if re.search(r"\b(?:sales|revenue|turnover|order value)\b", value) or any(
-        word in value for word in ("விற்பனை", "வருவாய்")
-    ):
-        return _call_read("get_sales_summary", {"period": detect_period(text)}, db, conversation)
+    sales_marker = re.search(r"\b(?:sales|revenue|turnover|order value|business)\b", intent_value)
+    if sales_marker or any(word in intent_value for word in ("வருவாய்", "விற்பனை")):
+        period = detect_period(text)
+        if "this month" in intent_value:
+            period = "this_month"
+        elif "yesterday" in intent_value:
+            period = "yesterday"
+        elif "today" in intent_value:
+            period = "today"
+        reply = _call_read("get_sales_summary", {"period": period}, db, conversation)
+        query_plan = {
+            "intent": "sales_summary",
+            "entity": "orders",
+            "operation": "sum",
+            "metric": "sales_amount",
+            "date_range": period,
+            "filters": {"exclude_cancelled": True},
+            "language": voice_parsing.detect_language(text),
+            "confidence": 0.95,
+            "raw_transcript": text,
+            "normalized_transcript": intent_value,
+        }
+        reply.data = {**(reply.data or {}), "query_plan": query_plan}
+        if reply.data.get("order_value") is not None:
+            reply.reply = format_read_result(
+                "get_sales_summary", reply.data, voice_parsing.detect_language(text)
+            )
+        return reply
 
     if re.search(r"\b(?:summary|report|business|dashboard|overview)\b", value) or any(
         word in value for word in ("சுருக்கம்", "அறிக்கை")
     ):
         return _call_read("get_business_summary", {"period": detect_period(text)}, db, conversation)
-
-    if re.search(r"\bpending orders?\b|\bunpaid orders?\b|\bopen orders?\b", value) or any(
-        word in value for word in ("நிலுவை ஆர்டர்", "பாக்கி ஆர்டர்", "முடிக்காத ஆர்டர்")
-    ):
-        return _call_read(
-            "list_orders", {"filter": "pending", "period": "today", "limit": 20}, db, conversation
-        )
 
     if re.search(r"\b(?:recent|latest|list|show|all) orders?\b", value) or any(
         word in value for word in ("ஆர்டர் பட்டியல்", "ஆர்டர்கள் காட்டு")
@@ -975,6 +1423,16 @@ def _handle_read_intent(db, conversation: VoiceConversation, text: str) -> Optio
 
 def _handle_write_intent(db, conversation: VoiceConversation, text: str) -> Optional[AgentReply]:
     value = voice_parsing.normalize(text)
+
+    if _is_bare_order_creation_request(text) and _parse_new_order(text) is None:
+        conversation.intent = "create_order"
+        conversation.draft = {}
+        conversation.missing_fields = ["customer"]
+        conversation.awaiting = {"kind": "order_customer"}
+        return AgentReply(
+            reply="Sure. Which registered customer is this order for? "
+            "You can say the customer name or phone number."
+        )
 
     # Payment recording.
     if re.search(
@@ -1284,6 +1742,25 @@ def _deterministic_turn(
                 )
             )
 
+    if conversation.awaiting and conversation.awaiting.get("kind") == "customer_duplicate":
+        duplicate = _customer_duplicate_reply(db, conversation, text)
+        if duplicate:
+            return duplicate
+
+    if _is_customer_creation_request(text) and not conversation.pending:
+        parsed_customer = _parse_customer_creation(text)
+        if parsed_customer:
+            conversation.intent = "create_customer"
+            conversation.draft = parsed_customer
+            conversation.awaiting = None
+            conversation.missing_fields = []
+            conversation.last_field = None
+            return _customer_creation_reply(db, conversation, "")
+        return _customer_creation_reply(db, conversation, text, start=True)
+
+    if conversation.intent == "create_customer" and not conversation.pending:
+        return _customer_creation_reply(db, conversation, text)
+
     if re.search(r"\b(?:show|current|review|open)\b.*\b(?:draft|preview)\b|\b(?:draft|preview)\b.*\b(?:show|status)\b", value):
         if conversation.pending:
             return AgentReply(reply=pending_reply(conversation.pending))
@@ -1303,6 +1780,10 @@ def _deterministic_turn(
     read = _handle_read_intent(db, conversation, text)
     if read:
         return read
+
+    general = _handle_general_read_query(db, conversation, text)
+    if general:
+        return general
 
     clarification = _handle_clarification(db, conversation, text)
     if clarification:
@@ -1333,6 +1814,69 @@ def _deterministic_turn(
             )
         )
     return AgentReply(reply=_help_text())
+
+
+def _handle_general_read_query(
+    db, conversation: VoiceConversation, text: str
+) -> Optional[AgentReply]:
+    """Best-effort offline planner for broad typed queries."""
+    value = voice_parsing.normalize(text)
+    if re.search(
+        r"\b(?:create|add|save|make|new|place|book|update|edit|change|move|record|pay|collect)\b",
+        value,
+        re.I,
+    ):
+        return None
+    if re.search(
+        r"\b(?:how much did we make|how much have we made|எவ்வளவு சம்பாதித்தோம்)\b",
+        value,
+        re.I,
+    ):
+        return AgentReply(reply="Do you mean total sales or payments collected?")
+
+    entity: Optional[str] = None
+    vocabulary = (
+        ("customers", r"\b(?:customers?|clients?|வாடிக்கையாளர்கள்?)\b"),
+        ("products", r"\b(?:products?|items?|பொருட்கள்?)\b"),
+        ("payments", r"\b(?:payments?|collections?|received|பணம்|வரவு)\b"),
+        ("balances", r"\b(?:balances?|owed|outstanding|due|நிலுவை)\b"),
+        ("orders", r"\b(?:orders?|invoices?|ஆர்டர்|ஆர்டர்கள்|பில்)\b"),
+    )
+    for candidate, pattern in vocabulary:
+        if re.search(pattern, value, re.I):
+            entity = candidate
+            break
+    if entity is None:
+        return None
+
+    if re.search(r"\b(?:how many|count|number of|எத்தனை)\b", value, re.I):
+        operation = "count"
+    elif re.search(r"\b(?:average|avg|சராசரி)\b", value, re.I):
+        operation = "average"
+    elif re.search(r"\b(?:total|sum|how much|மொத்தம்|எவ்வளவு)\b", value, re.I):
+        operation = "sum"
+    else:
+        operation = "list"
+
+    args: dict[str, Any] = {"entity": entity, "operation": operation}
+    if entity == "balances":
+        args["status"] = "outstanding"
+    if re.search(r"\b(?:today|இன்று|இன்னைக்கு)\b", value, re.I):
+        today = business_today().isoformat()
+        args.update(date_start=today, date_end=today)
+    elif re.search(r"\b(?:this month|இந்த மாதம்)\b", value, re.I):
+        start, end = period_bounds("this_month")
+        args.update(date_start=start, date_end=end)
+
+    match = re.search(
+        r"\b(?:for|from|by|of|க்கு|இன்)\s+([A-Za-z\u0B80-\u0BFF][\w\u0B80-\u0BFF .'-]{1,80})",
+        value,
+        re.I,
+    )
+    if match and entity in {"customers", "orders", "balances"}:
+        args["customer_name"] = _clean_query(match.group(1).split(" today", 1)[0])
+    result = voice_tools.execute_tool("query_business_data", args, db, conversation)
+    return reply_from_tool_result(conversation, result)
 
 
 # ---------------------------------------------------------------------------
@@ -1546,7 +2090,7 @@ def execute_confirmation(
     conversation.remember_completed(pending, result)
     action = pending.action
     conversation.pending = None
-    if action == "create_order":
+    if action in {"create_order", "create_customer"}:
         conversation.clear_draft()
     else:
         conversation.awaiting = None

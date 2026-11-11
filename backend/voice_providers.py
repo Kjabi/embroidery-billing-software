@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
+import subprocess
 import tempfile
 import threading
 from typing import Any, Protocol
@@ -124,6 +126,53 @@ class LocalFasterWhisper:
                     pass
 
 
+class WhisperCpp:
+    """Self-hosted whisper.cpp subprocess adapter for Tamil/Tanglish audio.
+
+    It deliberately has no fallback: a missing binary/model returns a typed
+    error instead of routing customer audio to any external service.
+    """
+
+    def transcribe(self, audio: bytes, filename: str, language: str | None = None) -> str:
+        binary = voice_config.whispercpp_binary()
+        model = voice_config.whispercpp_model()
+        resolved_binary = shutil.which(binary) if os.path.basename(binary) == binary else binary
+        if not resolved_binary or not os.path.isfile(resolved_binary):
+            raise VoiceProviderError("whisper.cpp is selected but its executable is unavailable. Type the command instead.")
+        if not model or not os.path.isfile(model):
+            raise VoiceProviderError("whisper.cpp is selected but VOICE_WHISPERCPP_MODEL is not configured or readable.")
+        temporary_path = ""
+        try:
+            # The browser sends PCM WAV for this provider; never trust filename paths.
+            with tempfile.NamedTemporaryFile(prefix="voice-", suffix=".wav", delete=False) as handle:
+                handle.write(audio)
+                temporary_path = handle.name
+            command = [
+                resolved_binary, "--no-gpu", "--threads", str(voice_config.whispercpp_threads()),
+                "--model", model, "--language", language or voice_config.stt_language() or "ta",
+                "--file", temporary_path, "--no-timestamps", "--no-prints",
+            ]
+            try:
+                completed = subprocess.run(
+                    command, capture_output=True, text=True, check=False,
+                    timeout=voice_config.stt_timeout_seconds(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise VoiceProviderError("Local Tamil transcription timed out. Please type the command instead.") from exc
+            if completed.returncode != 0:
+                raise VoiceProviderError("Local Tamil transcription could not decode the recording. Please repeat or type it.")
+            text = completed.stdout.strip()
+            if not text:
+                raise VoiceProviderError("I could not understand that recording. Please repeat or type the command.")
+            return text
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+
+
 class GroqWhisper:
     """Optional Groq transcription. Never selected automatically."""
 
@@ -191,6 +240,8 @@ def transcribe_audio(audio: bytes, filename: str, language: str | None = None) -
     provider = configured_provider()
     if provider == "groq":
         return GroqWhisper().transcribe(audio, filename, language)
+    if provider == "whispercpp":
+        return WhisperCpp().transcribe(audio, filename, language)
     if provider != "local":
         raise VoiceProviderError(
             "Unknown transcription provider. Use 'local' or an explicitly verified 'groq'."
