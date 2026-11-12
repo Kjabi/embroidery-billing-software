@@ -26,10 +26,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
+from pathlib import Path
+
 from storage import (
     StorageError, is_configured as storage_is_configured, upload_bytes as storage_upload_bytes,
     download_bytes as storage_download_bytes, delete_object as storage_delete_object,
     list_objects as storage_list_objects, verify_private_bucket as storage_verify_private_bucket,
+    upload_file_streaming as storage_upload_file_streaming, stream_download as storage_stream_download,
+    download_file_streaming as storage_download_file_streaming,
 )
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Boolean, Text, ForeignKey, inspect, text, event,
@@ -63,7 +67,25 @@ BACKUP_DIR = os.getenv("APP_BACKUP_DIR", os.path.join(BASE_DIR, "backups"))
 LOGO_PATH = os.path.join(BASE_DIR, "assets", "lalithas-apparel-logo.png")
 SUPABASE_BACKUP_BUCKET = os.getenv("SUPABASE_BACKUP_BUCKET", "lalithas-backups")
 SUPABASE_FILES_BUCKET = os.getenv("SUPABASE_FILES_BUCKET", "lalithas-files")
+PG_DUMP_OBJECT_PREFIX = "pg-dumps/"
+
+
+def _current_schema_version() -> str:
+    """Highest applied migration number; the honest schema stamp for manifests."""
+    override = os.getenv("APP_SCHEMA_VERSION", "").strip()
+    if override:
+        return override
+    try:
+        migration_files = sorted((Path(BASE_DIR) / "migrations").glob("0*.sql"))
+        if migration_files:
+            return migration_files[-1].stem
+    except OSError:
+        pass
+    return "unknown"
+
+
 APP_ENV = os.getenv("APP_ENV", "development").lower()
+SCHEMA_VERSION = _current_schema_version()
 IS_SERVERLESS_DEPLOYMENT = APP_ENV == "production" or os.getenv("VERCEL", "").lower() not in {"", "0", "false"}
 APP_SECRET_KEY = os.getenv("APP_SECRET_KEY", "")
 if not APP_SECRET_KEY:
@@ -223,9 +245,15 @@ def create_sqlite_snapshot(destination: str) -> None:
     Base.metadata.create_all(bind=backup_engine)
     with engine.connect() as source_conn, backup_engine.begin() as target_conn:
         for table in Base.metadata.sorted_tables:
-            rows = source_conn.execute(table.select()).mappings().all()
-            if rows:
-                target_conn.execute(table.insert(), [dict(row) for row in rows])
+            # stream_results keeps the database driver from buffering the whole
+            # table client-side; fetchmany caps the batch held in Python memory.
+            result = source_conn.execution_options(stream_results=True).execute(table.select())
+            while True:
+                batch = result.fetchmany(500)
+                if not batch:
+                    break
+                target_conn.execute(table.insert(), [dict(row) for row in batch])
+            result.close()
     backup_engine.dispose()
 
 
@@ -707,7 +735,7 @@ app.add_middleware(
     # The backup download names its file in Content-Disposition; without this
     # the browser hides it from cross-origin JS and the frontend has to guess
     # the filename. X-Backup-SHA256 lets the UI show a verifiable size/hash.
-    expose_headers=["Content-Disposition", "X-Backup-SHA256"],
+    expose_headers=["Content-Disposition", "X-Backup-SHA256", "X-Backup-Scope"],
 )
 
 
@@ -2287,8 +2315,32 @@ def add_transaction(req: TransactionCreate, db: Session = Depends(get_db), _: Ad
     return t
 
 
+def upload_storage_file_streaming(bucket: str, key: str, file_path: str, content_type: str) -> str:
+    """Storage upload that streams from disk; large artifacts never enter the heap."""
+    return storage_upload_file_streaming(bucket, key, file_path, content_type)
+
+
+def stream_download_sha256(bucket: str, key: str) -> tuple[int, str]:
+    """Stream an object back and hash it incrementally; returns (size, sha256)."""
+    hasher = hashlib.sha256()
+    total = storage_stream_download(bucket, key, hasher.update)
+    return total, hasher.hexdigest()
+
+
+def download_storage_file_streaming(bucket: str, key: str, destination_path: str) -> int:
+    """Stream a stored object to a local file for isolated restore verification."""
+    return storage_download_file_streaming(bucket, key, destination_path)
+
+
 def create_cloud_backup_artifacts(db: Session) -> dict:
-    """Create a unique DB snapshot and copy all private file-bucket objects into the private backup bucket."""
+    """Upload a data-export snapshot plus every private file object to the backup bucket.
+
+    Honesty rule: the database artifact produced here is a portable SQLite data
+    export, never a native PostgreSQL backup — even when the primary database is
+    Supabase Postgres. The manifest and API response say so explicitly, and
+    callers must not interpret this job as a complete production backup. Native
+    pg_dump backups are produced separately by backend/scripts/pg_backup.py.
+    """
     if not storage_is_configured():
         raise HTTPException(status_code=503, detail="Private Supabase Storage is not configured on the backend.")
     try:
@@ -2307,6 +2359,7 @@ def create_cloud_backup_artifacts(db: Session) -> dict:
     manifest_key = f"manifests/{day}/{backup_id}.json"
     max_objects = int(os.getenv("BACKUP_MAX_STORAGE_OBJECTS", "200"))
     max_object_bytes = int(os.getenv("BACKUP_MAX_OBJECT_BYTES", str(25 * 1024 * 1024)))
+    source_engine = "supabase-postgres" if primary_is_supabase() else "sqlite"
     copied_files = []
 
     try:
@@ -2314,8 +2367,6 @@ def create_cloud_backup_artifacts(db: Session) -> dict:
         with tempfile.TemporaryDirectory(prefix="lalithas-backup-") as temp_dir:
             database_path = os.path.join(temp_dir, f"{backup_id}.db")
             create_sqlite_snapshot(database_path)
-            with open(database_path, "rb") as source_file:
-                database_bytes = source_file.read()
             with sqlite3.connect(database_path) as verification_db:
                 integrity = verification_db.execute("PRAGMA integrity_check").fetchone()[0]
                 if integrity != "ok":
@@ -2333,14 +2384,28 @@ def create_cloud_backup_artifacts(db: Session) -> dict:
                     table.name: verification_db.execute(f'SELECT COUNT(*) FROM "{table.name}"').fetchone()[0]
                     for table in Base.metadata.sorted_tables
                 }
-            database_sha256 = hashlib.sha256(database_bytes).hexdigest()
-            upload_storage_bytes(SUPABASE_BACKUP_BUCKET, database_key, database_bytes, "application/octet-stream")
-            remote_database_bytes = storage_download_bytes(SUPABASE_BACKUP_BUCKET, database_key)
-            if hashlib.sha256(remote_database_bytes).hexdigest() != database_sha256:
+            database_size = os.path.getsize(database_path)
+            # Job-phase storage calls use the raw helpers: any failure inside
+            # the backup job surfaces as 502 "did not complete" below, while
+            # pre-flight bucket problems keep their 503 above.
+            storage_upload_file_streaming(SUPABASE_BACKUP_BUCKET, database_key, database_path, "application/octet-stream")
+            # Verify the stored object (not the local file) by streaming it back
+            # and hashing; memory stays bounded regardless of database size.
+            downloaded_size, downloaded_sha256 = stream_download_sha256(SUPABASE_BACKUP_BUCKET, database_key)
+            if downloaded_size != database_size:
+                raise RuntimeError(
+                    f"Stored database backup size mismatch: uploaded {database_size} bytes, read back {downloaded_size}."
+                )
+            with open(database_path, "rb") as local_copy:
+                local_hasher = hashlib.sha256()
+                for chunk in iter(lambda: local_copy.read(1024 * 1024), b""):
+                    local_hasher.update(chunk)
+            database_sha256 = local_hasher.hexdigest()
+            if downloaded_sha256 != database_sha256:
                 raise RuntimeError("Uploaded database backup failed SHA-256 read-back verification.")
+            # Re-download the stored object into a file for isolated restore proof.
             restored_copy_path = os.path.join(temp_dir, f"{backup_id}-isolated-restore.db")
-            with open(restored_copy_path, "wb") as restored_copy:
-                restored_copy.write(remote_database_bytes)
+            download_storage_file_streaming(SUPABASE_BACKUP_BUCKET, database_key, restored_copy_path)
             with sqlite3.connect(restored_copy_path) as isolated_restore_db:
                 isolated_integrity = isolated_restore_db.execute("PRAGMA integrity_check").fetchone()[0]
                 isolated_counts = {
@@ -2351,6 +2416,21 @@ def create_cloud_backup_artifacts(db: Session) -> dict:
                     raise RuntimeError("Downloaded database backup failed isolated restore verification.")
 
         files = storage_list_objects(SUPABASE_FILES_BUCKET, max_objects=max_objects)
+        listed_keys = {item["key"] for item in files}
+        # Every object an order references must exist in the files bucket;
+        # a missing object would make the backup silently incomplete.
+        required_object_keys: set[str] = set()
+        for column in (Order.drawing_object_key, Order.invoice_object_key, Order.reference_image_object_key):
+            required_object_keys.update(
+                value for (value,) in db.query(column).filter(column.isnot(None)).distinct().all() if value
+            )
+        missing_object_keys = sorted(required_object_keys - listed_keys)
+        if missing_object_keys:
+            preview = ", ".join(missing_object_keys[:3]) + ("…" if len(missing_object_keys) > 3 else "")
+            raise RuntimeError(
+                f"{len(missing_object_keys)} object(s) referenced by orders are missing from the files bucket "
+                f"({preview}); backup stopped without a completion manifest."
+            )
         for item in files:
             source_key = item["key"]
             payload = storage_download_bytes(SUPABASE_FILES_BUCKET, source_key)
@@ -2362,7 +2442,7 @@ def create_cloud_backup_artifacts(db: Session) -> dict:
             backup_object_key = f"storage-objects/{day}/{backup_id}/{source_key}"
             metadata = item.get("metadata") or {}
             content_type = metadata.get("mimetype") or metadata.get("contentType") or "application/octet-stream"
-            upload_storage_bytes(SUPABASE_BACKUP_BUCKET, backup_object_key, payload, content_type)
+            storage_upload_bytes(SUPABASE_BACKUP_BUCKET, backup_object_key, payload, content_type)
             stored_payload = storage_download_bytes(SUPABASE_BACKUP_BUCKET, backup_object_key)
             if hashlib.sha256(stored_payload).hexdigest() != sha256:
                 raise RuntimeError(f"Storage backup failed SHA-256 read-back verification for object {source_key!r}.")
@@ -2380,11 +2460,22 @@ def create_cloud_backup_artifacts(db: Session) -> dict:
             "brand": "Lalitha's Apparel",
             "backup_id": backup_id,
             "created_at": created_at.isoformat(timespec="seconds"),
+            "kind": "data-export-and-file-copy",
+            "schema_version": SCHEMA_VERSION,
+            "complete_backup": False,
+            "limitations": [
+                "The database artifact is a portable SQLite data export of the primary database's rows.",
+                "It is not a native PostgreSQL backup: schema objects, constraints, indexes, sequences and "
+                "extensions are regenerated from the application's own DDL, not restored from the dump.",
+                "Use backend/scripts/pg_backup.py (native pg_dump) for a complete PostgreSQL backup.",
+            ],
             "database": {
+                "source_engine": source_engine,
                 "engine": "Supabase PostgreSQL" if primary_is_supabase() else "SQLite development database",
+                "backup_format": "sqlite-export",
                 "backup_bucket": SUPABASE_BACKUP_BUCKET,
                 "object_key": database_key,
-                "size_bytes": len(database_bytes),
+                "size_bytes": database_size,
                 "sha256": database_sha256,
                 "sqlite_integrity_check": integrity,
                 "foreign_key_check": "passed",
@@ -2399,10 +2490,12 @@ def create_cloud_backup_artifacts(db: Session) -> dict:
             "files_bucket": SUPABASE_FILES_BUCKET,
             "file_objects": copied_files,
             "file_object_count": len(copied_files),
+            "required_object_count": len(required_object_keys),
             "verification": "Database and copied file objects read back and SHA-256 verified.",
+            "verification_status": "verified",
         }
         manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
-        upload_storage_bytes(SUPABASE_BACKUP_BUCKET, manifest_key, manifest_bytes, "application/json")
+        storage_upload_bytes(SUPABASE_BACKUP_BUCKET, manifest_key, manifest_bytes, "application/json")
         if hashlib.sha256(storage_download_bytes(SUPABASE_BACKUP_BUCKET, manifest_key)).hexdigest() != hashlib.sha256(manifest_bytes).hexdigest():
             raise RuntimeError("Uploaded backup manifest failed SHA-256 read-back verification.")
         return {
@@ -2413,6 +2506,11 @@ def create_cloud_backup_artifacts(db: Session) -> dict:
             "manifest_object": manifest_key,
             "file_object_count": len(copied_files),
             "integrity_verified": True,
+            "database_engine": source_engine,
+            "backup_format": "sqlite-export",
+            "schema_version": SCHEMA_VERSION,
+            "complete_backup": False,
+            "verification_status": "verified",
         }
     except HTTPException:
         raise
@@ -2437,8 +2535,15 @@ def verify_sqlite_snapshot(path: str) -> dict:
     return {"integrity_check": integrity, "table_count": len(table_names)}
 
 
-def build_backup_download_response(filename: str, payload: bytes) -> Response:
-    """Wrap snapshot bytes as an attachment download the browser will save."""
+def build_backup_download_response(filename: str, payload: bytes, scope: str = "full-sqlite-database") -> Response:
+    """Wrap snapshot bytes as an attachment download the browser will save.
+
+    ``X-Backup-Scope`` tells the UI what the file actually is:
+      - full-sqlite-database: the primary database really is SQLite, so this is
+        the whole database.
+      - portable-data-export: the primary is PostgreSQL and these bytes are only
+        a portable row export (no storage files, no native PG schema/sequences).
+    """
     return Response(
         content=payload,
         media_type="application/octet-stream",
@@ -2446,6 +2551,7 @@ def build_backup_download_response(filename: str, payload: bytes) -> Response:
             # ASCII-only filename; the frontend also parses this header.
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Backup-SHA256": hashlib.sha256(payload).hexdigest(),
+            "X-Backup-Scope": scope,
             "Cache-Control": "no-store",
         },
     )
@@ -2460,9 +2566,14 @@ def backup_database(db: Session = Depends(get_db), _: Admin = Depends(require_ad
     written on a serverless deployment, so the download works on Vercel without
     private Storage credentials. In local development a copy is still kept in
     APP_BACKUP_DIR, preserving the previous behaviour for the restore tooling.
+
+    When the primary database is PostgreSQL (Supabase) the result is honestly
+    labelled a portable data export via X-Backup-Scope — it is not a native
+    PostgreSQL backup and does not include private Storage files.
     """
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     filename = f"embroidery_backup_{stamp}.db"
+    scope = "portable-data-export" if primary_is_supabase() else "full-sqlite-database"
     if IS_SERVERLESS_DEPLOYMENT:
         temp_dir = tempfile.TemporaryDirectory(prefix="lalithas-backup-download-")
         dest_dir = temp_dir.name
@@ -2478,7 +2589,7 @@ def backup_database(db: Session = Depends(get_db), _: Admin = Depends(require_ad
             payload = snapshot_file.read()
         if not payload.startswith(b"SQLite format 3\x00"):
             raise RuntimeError("Generated backup is not a valid SQLite database file.")
-        return build_backup_download_response(filename, payload)
+        return build_backup_download_response(filename, payload, scope)
     except HTTPException:
         raise
     except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
@@ -2493,6 +2604,18 @@ def backup_database(db: Session = Depends(get_db), _: Admin = Depends(require_ad
 
 @app.post("/api/restore")
 async def restore_database(file: UploadFile = File(...), _: Admin = Depends(require_admin)):
+    if primary_is_supabase():
+        # A SQLite export can never represent a PostgreSQL database: native
+        # schema objects, sequences and storage files are missing. Replacing
+        # live Postgres rows from it would silently corrupt the production data.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This deployment runs on PostgreSQL. Restoring it from a SQLite export is not supported because "
+                "the export cannot represent the native schema, sequences and storage objects. "
+                "Follow the documented pg_restore staging procedure in PRODUCTION_BACKUP_RESTORE_RUNBOOK.md."
+            ),
+        )
     if IS_SERVERLESS_DEPLOYMENT:
         raise HTTPException(
             status_code=409,
@@ -2531,16 +2654,71 @@ async def restore_database(file: UploadFile = File(...), _: Admin = Depends(requ
             os.remove(uploaded_path)
 
 
+def masked_project_ref(url: str | None) -> str | None:
+    """Show enough of a Supabase project ref to identify it, never credentials."""
+    if not url:
+        return None
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return "masked"
+    project_ref = host.split(".")[0] if host else ""
+    if not project_ref:
+        return "masked"
+    if len(project_ref) <= 4:
+        return f"{project_ref}••••"
+    return f"{project_ref[:4]}••••{len(project_ref)}"
+
+
 @app.get("/api/cloud-backup/status")
 def cloud_backup_status(_: Admin = Depends(require_admin)):
+    storage_configured = storage_is_configured()
+    native_dump_present: bool | None = None
+    latest_pg_dump: str | None = None
+    if storage_configured:
+        try:
+            # A bounded listing of the pg-dumps prefix; just enough to know
+            # whether native pg_dump artifacts have been produced by
+            # backend/scripts/pg_backup.py. The backup bucket's pg-dumps/ prefix
+            # is pruned per the runbook, so this stays a small listing.
+            dumps = storage_list_objects(SUPABASE_BACKUP_BUCKET, prefix=PG_DUMP_OBJECT_PREFIX)
+            native_dump_present = bool(dumps)
+            if dumps:
+                latest_pg_dump = max(item["key"] for item in dumps)
+        except (StorageError, OSError):
+            native_dump_present = None  # unknown, never a silent "yes"
+
+    supabase_url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or ""
+    database_project_ref = masked_project_ref(supabase_url) if supabase_url else None
+    is_postgres = primary_is_supabase()
     return {
-        "primary_database": "supabase-postgres" if primary_is_supabase() else "local-sqlite",
-        "database_configured": primary_is_supabase(),
+        "primary_database": "supabase-postgres" if is_postgres else "local-sqlite",
+        "database_configured": is_postgres,
         "local_sqlite_backup": not IS_SERVERLESS_DEPLOYMENT,
-        "configured": storage_is_configured(),
-        "files_bucket": SUPABASE_FILES_BUCKET if storage_is_configured() else None,
-        "backup_bucket": SUPABASE_BACKUP_BUCKET if storage_is_configured() else None,
+        "configured": storage_configured,
+        "files_bucket": SUPABASE_FILES_BUCKET if storage_configured else None,
+        "backup_bucket": SUPABASE_BACKUP_BUCKET if storage_configured else None,
         "cloud_backup_includes_file_objects": True,
+        # What the /api/backup and /api/cloud-backup artifacts actually are:
+        "database_backup_format": "sqlite-export",
+        "complete_backup_available": native_dump_present is True,
+        "native_postgres_dump_present": native_dump_present,
+        "latest_pg_dump_object": latest_pg_dump,
+        "schema_version": SCHEMA_VERSION,
+        "database_project_ref": database_project_ref,
+        "files_project_ref": database_project_ref,
+        # Restore truth: SQLite exports restore only a SQLite primary, locally;
+        # PostgreSQL restore is a documented, separate staging procedure.
+        "restore_available": not IS_SERVERLESS_DEPLOYMENT and not is_postgres,
+        "production_restore_enabled": False,
+        "backup_guidance": (
+            "Download gives a portable SQLite data export; use Cloud backup to also copy file objects, and "
+            "backend/scripts/pg_backup.py for a native PostgreSQL backup. PostgreSQL restores follow the "
+            "staging runbook only."
+            if is_postgres else
+            "Backup downloads the full local SQLite database; Cloud backup additionally copies file objects "
+            "to Supabase Storage when configured."
+        ),
     }
 
 

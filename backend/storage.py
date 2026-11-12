@@ -5,8 +5,9 @@ All object paths are caller-generated and uploads default to no-overwrite.
 """
 from __future__ import annotations
 
+import hashlib
 import os
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import certifi
@@ -126,6 +127,96 @@ def delete_object(bucket: str, key: str) -> None:
                 raise StorageError(f"Supabase Storage cleanup failed with HTTP {response.status_code}.")
     except httpx.RequestError as exc:
         raise StorageError("Could not connect to Supabase Storage for cleanup.") from exc
+
+
+def _stream_timeout() -> float:
+    """Large backup artifacts need a longer HTTP timeout than normal API calls."""
+    try:
+        return max(60.0, float(os.getenv("STORAGE_HTTP_TIMEOUT_SECONDS", "600")))
+    except ValueError:
+        return 600.0
+
+
+def upload_file_streaming(bucket: str, key: str, file_path: str, content_type: str, *, upsert: bool = False) -> str:
+    """Upload a file from disk without holding its whole content in memory.
+
+    Used for large backup artifacts (pg_dump files, database snapshots) that must
+    never be buffered into the process heap.
+    """
+    endpoint, headers = _endpoint(f"object/{_object_path(bucket, key)}")
+    headers.update({
+        "Content-Type": content_type,
+        "x-upsert": "true" if upsert else "false",
+    })
+    try:
+        with open(file_path, "rb") as source_file:
+            with httpx.Client(timeout=_stream_timeout(), verify=certifi.where()) as client:
+                response = client.post(endpoint, content=source_file, headers=headers)
+        if response.status_code >= 400:
+            if response.status_code == 409:
+                raise StorageError("Supabase Storage object already exists; refusing to overwrite it.")
+            raise StorageError(f"Supabase Storage upload failed with HTTP {response.status_code}.")
+    except httpx.RequestError as exc:
+        raise StorageError("Could not connect to Supabase Storage for upload.") from exc
+    return key
+
+
+def stream_download(
+    bucket: str,
+    key: str,
+    sink: Callable[[bytes], None],
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> int:
+    """Stream an object to ``sink`` chunk by chunk; return the total byte count.
+
+    The caller supplies what to do with each chunk, so verification hashing and
+    writing to disk both stay O(chunk) in memory regardless of object size.
+    """
+    endpoint, headers = _endpoint(f"object/{_object_path(bucket, key)}")
+    total = 0
+    try:
+        with httpx.Client(timeout=_stream_timeout(), verify=certifi.where()) as client:
+            with client.stream("GET", endpoint, headers=headers) as response:
+                if response.status_code >= 400:
+                    raise StorageError(f"Supabase Storage download failed with HTTP {response.status_code}.")
+                for chunk in response.iter_bytes(chunk_size=chunk_size):
+                    sink(chunk)
+                    total += len(chunk)
+    except httpx.RequestError as exc:
+        raise StorageError("Could not connect to Supabase Storage for download.") from exc
+    return total
+
+
+def download_file_streaming(bucket: str, key: str, destination_path: str, *, chunk_size: int = 1024 * 1024) -> int:
+    """Stream an object to a local file; return the byte count written.
+
+    Writes to a sibling temporary file first and renames on success so a failed
+    download never leaves a partial artifact behind.
+    """
+    temporary_path = f"{destination_path}.part"
+
+    def sink(chunk: bytes) -> None:
+        append_chunk(temporary_path, chunk)
+
+    try:
+        total = stream_download(bucket, key, sink, chunk_size=chunk_size)
+    except Exception:
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+        raise
+    if not os.path.exists(temporary_path):
+        # An empty object is still valid; create the empty file.
+        append_chunk(temporary_path, b"")
+    os.replace(temporary_path, destination_path)
+    return total
+
+
+def append_chunk(path: str, chunk: bytes) -> None:
+    with open(path, "ab") as target:
+        target.write(chunk)
 
 
 

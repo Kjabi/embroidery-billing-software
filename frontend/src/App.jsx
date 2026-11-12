@@ -555,7 +555,14 @@ export default function App() {
       document.body.appendChild(link);
       link.click();
       link.remove();
-      notify(`Backup downloaded: ${filename} (${(blob.size / 1024).toFixed(0)} KB).`);
+      // X-Backup-Scope tells us what the file really is: with a PostgreSQL
+      // primary this download is a portable data export, not the whole database.
+      const scope = response.headers.get("x-backup-scope");
+      if (scope === "portable-data-export") {
+        notify(`Portable data export downloaded: ${filename} (${(blob.size / 1024).toFixed(0)} KB). This is not a complete production backup.`);
+      } else {
+        notify(`Backup downloaded: ${filename} (${(blob.size / 1024).toFixed(0)} KB).`);
+      }
     } catch (error) {
       notify(error.message || "Backup could not be created.", "error");
     } finally {
@@ -568,7 +575,13 @@ export default function App() {
       const response = await apiFetch(`${API}/cloud-backup`, { method: "POST" });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.detail || "Cloud backup failed.");
-      notify(`Cloud backup completed: ${result.database_object}`);
+      // Be precise about what was backed up: the database artifact is a SQLite
+      // data export, never a native PostgreSQL backup.
+      if (result.complete_backup === true) {
+        notify(`Cloud backup verified: ${result.database_object} (${result.file_object_count} files).`);
+      } else {
+        notify(`Cloud backup stored and verified (${result.file_object_count} files). Format: SQLite data export — not a full PostgreSQL backup.`);
+      }
     } catch (error) {
       notify(error.message || "Cloud backup failed.", "error");
     }
@@ -2261,7 +2274,7 @@ export default function App() {
                 <div className="mobile-link-list">
                   <button type="button" onClick={createBackup}>
                     <span className="mobile-link-icon"><DatabaseBackup size={20} /></span>
-                    <span className="min-w-0"><strong>Backup database</strong><small>Create a local backup file</small></span>
+                    <span className="min-w-0"><strong>Backup database</strong><small>Download a portable data export file</small></span>
                     <ChevronRight size={18} />
                   </button>
                   <button type="button" onClick={() => restoreInputRef.current?.click()}>
@@ -2273,7 +2286,7 @@ export default function App() {
                     <span className="mobile-link-icon"><Cloud size={20} /></span>
                     <span className="min-w-0">
                       <strong>Cloud backup</strong>
-                      <small>{cloudBackupConfigured ? "Upload a snapshot to Supabase Storage" : "Supabase Storage is not configured"}</small>
+                      <small>{cloudBackupConfigured ? "Store a data export + file copies in Supabase Storage" : "Supabase Storage is not configured"}</small>
                     </span>
                     <ChevronRight size={18} />
                   </button>
@@ -2736,17 +2749,9 @@ export default function App() {
           </button>
           <button
             disabled={!cloudBackupConfigured}
-            onClick={async () => {
-              const response = await apiFetch(`${API}/cloud-backup`, { method: "POST" });
-              const result = await response.json().catch(() => ({}));
-              if (!response.ok) {
-                alert(result.detail || "Cloud backup failed.");
-                return;
-              }
-              alert(`Cloud backup completed.\nDatabase: ${result.database_object}`);
-            }}
+            onClick={createCloudBackup}
             className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-blue-50 hover:bg-blue-100 text-xs text-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-            title={cloudBackupConfigured ? "Upload a SQLite snapshot to Supabase Storage" : "Configure Supabase Storage credentials on the backend first"}
+            title={cloudBackupConfigured ? "Store a SQLite data export plus file copies in Supabase Storage" : "Configure Supabase Storage credentials on the backend first"}
           >
             <DatabaseBackup size={15} /> {cloudBackupConfigured ? "Backup to Supabase Storage" : "Supabase Storage Backup Not Configured"}
           </button>
