@@ -14,6 +14,7 @@ import importlib
 import io
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -328,16 +329,108 @@ def test_finance_exports_are_valid_and_csv_formula_safe(tmp_path: Path) -> None:
         assert pdf_response.content.startswith(b"%PDF")
 
 
-def test_backup_returns_clear_503_on_serverless_without_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backup_downloads_a_verified_sqlite_file(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        headers = login(client)
+        marker_phone = f"9{uuid4().hex[:9]}"
+        created = client.post("/api/customers", headers=headers, json={
+            "name": "Backup Roundtrip Marker", "phone": marker_phone,
+        })
+        assert created.status_code == 200
+
+        response = client.post("/api/backup", headers=headers)
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/octet-stream")
+        disposition = response.headers["content-disposition"]
+        assert disposition.startswith("attachment"), disposition
+        match = re.search(
+            r'filename="embroidery_backup_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.db"', disposition
+        )
+        assert match, f"no meaningful backup filename in {disposition!r}"
+
+        payload = response.content
+        assert payload.startswith(b"SQLite format 3\x00"), "backup is not a SQLite database"
+        assert response.headers["x-backup-sha256"] == hashlib.sha256(payload).hexdigest()
+
+        downloaded = tmp_path / "downloaded.db"
+        downloaded.write_bytes(payload)
+        with sqlite3.connect(downloaded) as snapshot_db:
+            assert snapshot_db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            tables = {
+                row[0] for row in snapshot_db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )
+            }
+            assert {"customers", "orders", "products"} <= tables
+            assert snapshot_db.execute(
+                "SELECT COUNT(*) FROM customers WHERE name = 'Backup Roundtrip Marker'"
+            ).fetchone()[0] == 1
+
+        # Local development keeps the previous server-side copy in APP_BACKUP_DIR.
+        dev_copies = list((tmp_path / "backups").glob("embroidery_backup_*.db"))
+        assert len(dev_copies) == 1
+        assert dev_copies[0].read_bytes() == payload
+
+
+def test_backup_works_on_serverless_without_storage_or_persistent_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     with make_client(tmp_path) as client:
         headers = login(client)
         import main
 
         monkeypatch.setattr(main, "IS_SERVERLESS_DEPLOYMENT", True)
         response = client.post("/api/backup", headers=headers)
-        assert response.status_code == 503
-        assert "serverless" in response.json()["detail"].lower()
-        assert not (tmp_path / "backups").exists() or not list((tmp_path / "backups").glob("backup_*.db"))
+        assert response.status_code == 200, response.text
+        assert response.content.startswith(b"SQLite format 3\x00")
+        assert response.headers["content-type"].startswith("application/octet-stream")
+        assert "attachment" in response.headers["content-disposition"]
+        backup_dir = tmp_path / "backups"
+        assert not backup_dir.exists() or not list(backup_dir.glob("*.db")), \
+            "a serverless backup must not leave files on the ephemeral disk"
+
+
+def test_backup_failure_returns_502_and_leaves_no_partial_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with make_client(tmp_path) as client:
+        headers = login(client)
+        import main
+
+        def explode(destination: str) -> None:
+            raise RuntimeError("simulated snapshot failure")
+
+        monkeypatch.setattr(main, "create_sqlite_snapshot", explode)
+        response = client.post("/api/backup", headers=headers)
+        assert response.status_code == 502
+        assert "simulated snapshot failure" in response.json()["detail"]
+        backup_dir = tmp_path / "backups"
+        assert not backup_dir.exists() or not list(backup_dir.glob("*.db"))
+
+
+def test_downloaded_backup_round_trips_through_restore(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        headers = login(client)
+        baseline = {item["name"] for item in page_items(client.get("/api/customers", headers=headers))}
+        assert baseline, "the seeded database should contain customers"
+
+        snapshot = client.post("/api/backup", headers=headers).content
+        marker_phone = f"9{uuid4().hex[:9]}"
+        marker = client.post("/api/customers", headers=headers, json={
+            "name": "Post Snapshot Marker", "phone": marker_phone,
+        })
+        assert marker.status_code == 200
+        after_marker = {item["name"] for item in page_items(client.get("/api/customers", headers=headers))}
+        assert "Post Snapshot Marker" in after_marker
+
+        restored = client.post("/api/restore", headers=headers, files={
+            "file": ("embroidery_backup_roundtrip.db", snapshot, "application/octet-stream"),
+        })
+        assert restored.status_code == 200, restored.text
+
+        after_restore = {item["name"] for item in page_items(client.get("/api/customers", headers=headers))}
+        assert "Post Snapshot Marker" not in after_restore, "the restore did not roll back to the snapshot"
+        assert baseline <= after_restore, "the restore lost pre-snapshot customers"
 
 
 def test_restore_rejects_invalid_and_incomplete_backups(tmp_path: Path) -> None:

@@ -528,13 +528,38 @@ export default function App() {
   };
 
   const createBackup = async () => {
+    let objectUrl = "";
     try {
       const response = await apiFetch(`${API}/backup`, { method: "POST" });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.detail || "Backup could not be created.");
-      notify(result.backup_file ? `Database backed up to ${result.backup_file}` : "Database backup created.");
+      if (!response.ok) {
+        const problem = await response.json().catch(() => ({}));
+        throw new Error(problem.detail || `Backup could not be created (HTTP ${response.status}).`);
+      }
+      if (!(response.headers.get("content-type") || "").includes("application/octet-stream")) {
+        throw new Error("The server did not return a backup file. Please try again.");
+      }
+      // Read the attachment name the server chose, but fall back to a locally
+      // generated, equally meaningful name if the header is missing.
+      const disposition = response.headers.get("content-disposition") || "";
+      const headerName = /filename="([^"]+)"/.exec(disposition)?.[1];
+      const stamp = new Date().toISOString().slice(0, 19).replace("T", "_");
+      const filename = headerName || `embroidery_backup_${stamp}.db`;
+      const blob = await response.blob();
+      if (!blob.size) throw new Error("The backup file arrived empty. Please try again.");
+
+      // Hand the bytes to the browser's download manager, then release the URL.
+      objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      notify(`Backup downloaded: ${filename} (${(blob.size / 1024).toFixed(0)} KB).`);
     } catch (error) {
       notify(error.message || "Backup could not be created.", "error");
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     }
   };
 
@@ -2688,16 +2713,7 @@ export default function App() {
 
         <div className="sidebar-actions space-y-2 pt-4 border-t border-slate-800">
           <button
-            onClick={async () => {
-              try {
-                const response = await apiFetch(`${API}/backup`, { method: "POST" });
-                const result = await response.json().catch(() => ({}));
-                if (!response.ok) throw new Error(result.detail || "Backup could not be created.");
-                alert(result.backup_file ? `Database backed up to:\n${result.backup_file}` : "Database backup created.");
-              } catch (error) {
-                alert(error.message || "Backup could not be created.");
-              }
-            }}
+            onClick={createBackup}
             className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200"
           >
             <DatabaseBackup size={15} /> Backup Database

@@ -704,6 +704,10 @@ app.add_middleware(
     allow_origins=FRONTEND_ORIGINS,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
+    # The backup download names its file in Content-Disposition; without this
+    # the browser hides it from cross-origin JS and the frontend has to guess
+    # the filename. X-Backup-SHA256 lets the UI show a verifiable size/hash.
+    expose_headers=["Content-Disposition", "X-Backup-SHA256"],
 )
 
 
@@ -2416,22 +2420,75 @@ def create_cloud_backup_artifacts(db: Session) -> dict:
         raise HTTPException(status_code=502, detail=f"Cloud backup did not complete: {exc}") from exc
 
 
+def verify_sqlite_snapshot(path: str) -> dict:
+    """Validate a generated snapshot before it is handed to the admin's browser."""
+    with sqlite3.connect(path) as snapshot_db:
+        integrity = snapshot_db.execute("PRAGMA integrity_check").fetchone()[0]
+        if integrity != "ok":
+            raise RuntimeError(f"Generated backup failed SQLite integrity_check: {integrity}")
+        table_names = {
+            row[0] for row in snapshot_db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+    missing = {table.name for table in Base.metadata.sorted_tables} - table_names
+    if missing:
+        raise RuntimeError(f"Generated backup is missing required tables: {', '.join(sorted(missing))}")
+    return {"integrity_check": integrity, "table_count": len(table_names)}
+
+
+def build_backup_download_response(filename: str, payload: bytes) -> Response:
+    """Wrap snapshot bytes as an attachment download the browser will save."""
+    return Response(
+        content=payload,
+        media_type="application/octet-stream",
+        headers={
+            # ASCII-only filename; the frontend also parses this header.
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Backup-SHA256": hashlib.sha256(payload).hexdigest(),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @app.post("/api/backup")
 def backup_database(db: Session = Depends(get_db), _: Admin = Depends(require_admin)):
-    if storage_is_configured():
-        return create_cloud_backup_artifacts(db)
-    if IS_SERVERLESS_DEPLOYMENT:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Local file backups are not available on this serverless deployment. "
-                "Configure Supabase Storage credentials to enable cloud backups."
-            ),
-        )
+    """Create a portable SQLite snapshot and return it as a browser download.
+
+    The bytes are generated into a transient directory, verified (integrity plus
+    required tables), and streamed back as an attachment. Nothing durable is
+    written on a serverless deployment, so the download works on Vercel without
+    private Storage credentials. In local development a copy is still kept in
+    APP_BACKUP_DIR, preserving the previous behaviour for the restore tooling.
+    """
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    dest = os.path.join(BACKUP_DIR, f"backup_{stamp}.db")
-    create_sqlite_snapshot(dest)
-    return {"status": "ok", "backup_file": dest, "storage": "local-development-only"}
+    filename = f"embroidery_backup_{stamp}.db"
+    if IS_SERVERLESS_DEPLOYMENT:
+        temp_dir = tempfile.TemporaryDirectory(prefix="lalithas-backup-download-")
+        dest_dir = temp_dir.name
+    else:
+        temp_dir = None
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        dest_dir = BACKUP_DIR
+    destination = os.path.join(dest_dir, filename)
+    try:
+        create_sqlite_snapshot(destination)
+        verify_sqlite_snapshot(destination)
+        with open(destination, "rb") as snapshot_file:
+            payload = snapshot_file.read()
+        if not payload.startswith(b"SQLite format 3\x00"):
+            raise RuntimeError("Generated backup is not a valid SQLite database file.")
+        return build_backup_download_response(filename, payload)
+    except HTTPException:
+        raise
+    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+        if temp_dir is None and os.path.exists(destination):
+            # Never leave a partial or unverified file behind in the dev folder.
+            os.remove(destination)
+        raise HTTPException(status_code=502, detail=f"Backup could not be created: {exc}") from exc
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
 
 
 @app.post("/api/restore")
