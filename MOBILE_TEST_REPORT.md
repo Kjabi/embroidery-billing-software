@@ -122,6 +122,55 @@ Desktop UI is unchanged — no global CSS regressions.
 
 ---
 
-## 9. Conclusion
+## 9. Repeatable automated test suite (added 12 Nov 2026)
 
-All 105 mobile checks pass across 11 viewport widths, all end-to-end flows (customer CRUD, 6-step order wizard with drafts, payment collection with idempotency, invoice PDF, delete with confirmation) succeed, accessibility/touch-target/font-size requirements are met, and the desktop regression audit remains 23/23 with zero errors. The mobile implementation is ready for the owner's pre-commit review.
+The exploratory suites in §1 were supplemented with a versioned, repeatable E2E package so these results can be reproduced by anyone.
+
+**Location:** `tests/` (`package.json` pins `playwright@1.64.1`; `helpers/harness.mjs` provides login, API seeding, overflow/a11y/touch/font assertions and overlay cleanup).
+
+**Run:**
+
+```bash
+cd tests
+node --test --test-concurrency=1 e2e/*.spec.mjs
+```
+
+Requires the local backend (`:8010`) and frontend (`:5173`). `voice-runtime` and `voice-model` additionally need a voice-enabled dev server on `:5174` (`VITE_VOICE_ENABLED=true`).
+
+| Spec | Tests | Covers |
+|---|---|---|
+| `mobile-shell.spec.mjs` | 12 | shell switch at 320–1440, per-tab overflow, 5-tab bottom nav, targets ≥ 44 px, nav never covers controls, compact header, hash/deep-link/404, a11y, input font, customer-form targets, zero errors; desktop shell at 4 widths |
+| `mobile-customers.spec.mjs` | 9 | list, create, numeric phone + keyboard, duplicate warning, `tel:` link, edit persisted, delete with confirm, empty state |
+| `mobile-orders.spec.mjs` | 11 | cards, status filter, invoice search, detail money + invoice actions, 6-step wizard, step validation, draft survives reload, payment + over-payment guard, PDF, delete |
+| `mobile-finance-states.spec.mjs` | 11 | finance metrics/period/ledger/export, products/rates/templates, rate editor, More inventory, empty/loading/error/401 states |
+| `desktop-regression.spec.mjs` | 8 | sidebar at 4 widths, per-section overflow, orders table, customer search, invoice detail + payment dialog, multi-column form, labels, zero errors |
+| `voice-runtime.spec.mjs` | 5 | no voice/model asset on startup, none on panel open, no CDN, language choices, zero errors |
+| `voice-model.spec.mjs` | 1 | real Whisper pipeline initialises; WASM same-origin, no CDN; HF weights fetched |
+| **Total** | **57** | |
+
+**Latest full run (12 Nov 2026): 57 passed, 0 failed, 0 cancelled** (232.4 s), alongside **51/51** frontend unit tests and **157/157** backend tests.
+
+### Test cases created and resolved in this round
+
+| Defect found by a test | Resolution |
+|---|---|
+| `GET /customers/{id}` returned 405 in the test (wrong endpoint assumption) | Test now verifies through `GET /customers?q=` |
+| Order list did not include API-seeded orders | Added `reloadApp()`; the app caches lists by design |
+| Status chip selector matched “Partially Paid” when filtering “Paid” | Exact-match chip selector |
+| Payment dialog action is not `role=alertdialog` for the primary confirm | Corrected selectors |
+| Phone image link in the order sheet only ~17 px tall | **Product fix:** `min-height: 44px` on `.mobile-inline-link` |
+| Loading-state test un-routed an in-flight request → unhandled rejection | Explicit release gate + guarded `route.continue()` |
+| Desktop table headers compared case-sensitively (CSS uppercases them) | Case-insensitive assertion |
+| Desktop tests left a detail sheet open, blocking later clicks | `closeAnyOverlay()` between steps |
+
+### Known gaps in the automated suite
+
+- Voice specs need a second (voice-enabled) dev server; they are not part of the production build path.
+- No physical-device runs (iOS/Android) and no landscape-phone profile.
+- E2E always runs against a local SQLite backend; it has not been pointed at the Vercel preview (Deployment Protection + shared production data — see `LIVE_PREVIEW_ACCEPTANCE_REPORT.md`).
+
+---
+
+## 10. Conclusion
+
+All 105 exploratory mobile checks plus the 57 new automated E2E tests pass across 11 viewport widths; every end-to-end flow (customer CRUD, 6-step order wizard with drafts, payment collection with idempotency, invoice PDF, delete with confirmation, loading/error/401 states) succeeds; accessibility, touch-target and font-size requirements are met; and the desktop regression suite is green with zero errors. The mobile implementation is ready for the owner's pre-commit review.

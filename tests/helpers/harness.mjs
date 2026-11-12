@@ -294,6 +294,13 @@ export async function assertInputFontSizes(page, label, min = MIN_INPUT_FONT) {
 // ---------------------------------------------------------------------------
 // Mobile navigation helpers
 // ---------------------------------------------------------------------------
+/** Reload the app so freshly created records are pulled into the client state. */
+export async function reloadApp(page) {
+  await page.reload({ waitUntil: "networkidle" });
+  await page.waitForSelector(".mobile-app, aside", { timeout: 20000 });
+  await page.waitForTimeout(900);
+}
+
 export async function openMobileTab(page, label) {
   await page.locator(".mobile-bottom-nav button", { hasText: label }).first().click();
   await page.waitForTimeout(700);
@@ -309,4 +316,24 @@ export async function confirmDialog(page, confirmLabel) {
   const dialog = page.locator('[role="alertdialog"]');
   await dialog.waitFor({ timeout: 8000 });
   await dialog.getByRole("button", { name: confirmLabel }).click();
+}
+
+/**
+ * Close any sheet or dialog that a previous step may have left open, so one
+ * failing assertion cannot cascade into unrelated tests.
+ */
+export async function closeAnyOverlay(page) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const open = await page.locator(".mobile-sheet, .mobile-dialog, [role='alertdialog']").count();
+    if (!open) return;
+    const close = page.locator(
+      ".mobile-sheet [aria-label^='Close'], .mobile-dialog [aria-label^='Close'], .mobile-dialog-actions button"
+    ).first();
+    if (await close.count()) {
+      await close.click({ timeout: 3000 }).catch(() => {});
+    } else {
+      await page.keyboard.press("Escape").catch(() => {});
+    }
+    await page.waitForTimeout(200);
+  }
 }

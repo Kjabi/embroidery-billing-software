@@ -12,6 +12,24 @@
  * be removed from the assistant panel.
  */
 
+// ONNX Runtime Web is bundled with the application, so the WebAssembly binary
+// is served from our own origin instead of a third-party CDN.  Transformers.js
+// otherwise points `wasmPaths` at cdn.jsdelivr.net, which the deployed
+// Content-Security-Policy deliberately does not allow - the runtime would then
+// fail to initialise in production.  `ortAssets.js` resolves the hashed,
+// same-origin asset that the build already emits; it is imported dynamically so
+// that plain-Node unit tests never have to resolve a Vite `?url` specifier.
+let ortAssetPromise = null;
+
+function localOrtWasmUrl() {
+  if (!ortAssetPromise) {
+    ortAssetPromise = import("./ortAssets.js")
+      .then(module => module.ORT_WASM_URL)
+      .catch(() => "");
+  }
+  return ortAssetPromise;
+}
+
 export const TARGET_SAMPLE_RATE = 16000;
 export const DEFAULT_MODEL = "onnx-community/whisper-base";
 export const TAMIL_MODEL = "onnx-community/whisper-small";
@@ -179,6 +197,21 @@ export function modelOptions(language = "en") {
   };
 }
 
+// WebGPU is much faster, but `navigator.gpu` can exist while no adapter is
+// actually available (headless browsers, some Linux builds, blocked GPU
+// drivers). Choosing "webgpu" in that situation aborts the whole pipeline with
+// "no available backend found", so the adapter is requested first and the
+// WebAssembly backend is used whenever a real adapter cannot be obtained.
+export async function preferredExecutionDevice() {
+  if (!navigator.gpu) return "wasm";
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    return adapter ? "webgpu" : "wasm";
+  } catch {
+    return "wasm";
+  }
+}
+
 export async function loadLocalWhisper(onProgress, language = "en") {
   const { model, dtype } = modelOptions(language);
   if (loadedPipeline && loadedModelKey === `${model}:${dtype}`) {
@@ -193,10 +226,15 @@ export async function loadLocalWhisper(onProgress, language = "en") {
     env.useBrowserCache = true;
     if (env.backends?.onnx?.wasm) {
       env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(2, navigator.hardwareConcurrency || 1));
+      // Keep the WebAssembly binary on our own origin. `env.backends.onnx.wasm`
+      // is the live ONNX Runtime environment object, so this replaces the
+      // jsDelivr path that Transformers.js installs by default.
+      const localWasmUrl = await localOrtWasmUrl();
+      if (localWasmUrl) env.backends.onnx.wasm.wasmPaths = { wasm: localWasmUrl };
     }
     const created = await pipeline("automatic-speech-recognition", model, {
       dtype,
-      device: navigator.gpu ? "webgpu" : "wasm",
+      device: await preferredExecutionDevice(),
       progress_callback: progressTracker(onProgress),
     });
     loadedPipeline = created;

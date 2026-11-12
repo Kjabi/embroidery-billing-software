@@ -1820,6 +1820,10 @@ main table button {
   }
 
   .mobile-inline-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 4px;
     color: #1768c4;
     font-weight: 650;
     text-decoration: underline;

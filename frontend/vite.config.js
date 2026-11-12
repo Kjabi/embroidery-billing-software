@@ -12,5 +12,20 @@ export default defineConfig(({ command, mode }) => {
   }
   return {
     plugins: [react()],
+    build: {
+      rollupOptions: {
+        output: {
+          // Split stable third-party code into long-lived chunks so an
+          // application-code change does not invalidate the React runtime in
+          // every visitor's browser cache.
+          manualChunks(id) {
+            if (!id.includes("node_modules")) return undefined;
+            if (/node_modules\/(react|react-dom|scheduler)\//.test(id)) return "react-vendor";
+            if (id.includes("node_modules/lucide-react/")) return "icons";
+            return undefined;
+          },
+        },
+      },
+    },
   }
 })
